@@ -37,3 +37,7 @@ input gain `FF 55 04 02 04`; parametric EQ under prefix `FF 56`. On that driver 
 Control4 does not use Audio Off. A room that is "off" stays routed to input 5 with the volume at the floor (-108.5 dB; one room also muted).
 Playing rooms were at -55.6 dB. The integration therefore treats a room as ON only when it is routed AND above the volume floor, turns a room on by routing it and raising it to its last real volume (default 10, about -55 dB), and uses Audio Off for its own "off".
 Polling check: 30 queries on ONE connection returned clean in 0.31 s; five back-to-back sessions were fine.
+
+## First live write test (Bar, output 10, 2026-10-16 15:55)
+Through Home Assistant on the real amp: volume set, mute, volume up (also unmutes), turn off (Audio Off), turn on (restores source and last volume) all worked, and the amp's own read-back matched each time. The Bar was restored to -52.0 dB, muted, input 5.
+The real curve is steeper than the linear interpolation between measured points: value 13 reads -50.5 dB, where interpolation says about -52.7. Run `tools/triad_volume_scan.py` and paste the full table into `protocol.VOLUME_POINTS`.

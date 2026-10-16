@@ -44,7 +44,7 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
             name=coordinator.outputs[output],
             manufacturer="Triad",
             model="AMS audio matrix",
-            via_device=(DOMAIN, entry.entry_id),
+            via_device_id=coordinator.hub_device_id,
             configuration_url=f"http://{entry.data[CONF_HOST]}",
         )
 

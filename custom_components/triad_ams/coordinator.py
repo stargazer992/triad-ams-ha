@@ -61,6 +61,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self.outputs = _int_keys(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS))
         self.inputs = _int_keys(options.get(CONF_INPUTS, DEFAULT_INPUTS))
         self.default_input = int(options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT))
+        self.hub_device_id: str | None = None          # registry id of the amp device (rooms hang off it)
         self.entity_ids: dict[int, str] = {}           # output -> media_player entity id (filled by the entities)
         self.last_volume: dict[int, int] = {}          # output -> last volume above the floor, used by turn_on
         self.last_source: dict[int, int] = {}          # output -> last real source, used by turn_on

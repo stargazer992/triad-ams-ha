@@ -40,7 +40,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TriadConfigEntry) -> boo
     if not coordinator.last_update_success:
         raise ConfigEntryNotReady("Triad AMS did not answer")
     entry.runtime_data = coordinator
-    dr.async_get(hass).async_get_or_create(              # the amp itself; every room hangs off it
+    hub = dr.async_get(hass).async_get_or_create(              # the amp itself; every room hangs off it
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, entry.entry_id)},
         name="Triad AMS",
@@ -48,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TriadConfigEntry) -> boo
         model="AMS audio matrix",
         configuration_url=f"http://{entry.data[CONF_HOST]}",
     )
+    coordinator.hub_device_id = hub.id
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_options_updated))
     _register_services(hass)

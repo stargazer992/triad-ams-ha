@@ -6,7 +6,7 @@ A HACS custom integration for the Triad AMS (tested on the 24x24) over TCP. It m
 volume, mute, on/off, source selection and grouping, so the house can run without Control4. A WiiM (or any source on an amp input)
 feeds the matrix; Home Assistant routes it to rooms.
 
-**Status: v0.2.0 adds per-room bass / treble / balance sliders (v0.1.4 runs live on a real Triad AMS 24x24 in control mode: whole-house music, scheduler and dashboards drive it). A new install still starts read only.**
+**Status: v0.2.1 (tone sliders, first shipped as v0.2.0) adds per-room bass / treble / balance sliders (v0.1.4 runs live on a real Triad AMS 24x24 in control mode: whole-house music, scheduler and dashboards drive it). A new install still starts read only.**
 
 - **Safe by default**: a new entry only reads (monitor mode). You switch to control mode in the options, which saves a snapshot first.
 - **Rollback**: options > roll back to monitor; `triad_ams.restore_snapshot`; or `tools/triad_rollback.py` without Home Assistant. See `docs/rollback.md`.

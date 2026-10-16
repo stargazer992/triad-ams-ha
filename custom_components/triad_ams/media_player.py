@@ -66,7 +66,12 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
         state = self._state
         if state is None:
             return None
-        return MediaPlayerState.OFF if state.source is None else MediaPlayerState.ON
+        return MediaPlayerState.ON if self._is_on(state) else MediaPlayerState.OFF
+
+    @staticmethod
+    def _is_on(state: OutputState) -> bool:
+        """On = routed to an input AND above the volume floor. Control4 'off' keeps the route at the floor."""
+        return state.source is not None and bool(state.volume_value)
 
     @property
     def volume_level(self) -> float | None:
@@ -90,7 +95,7 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         state = self._state
-        if state is None or state.source is None:
+        if state is None or not self._is_on(state):
             return None
         return self._input_name(state.source)
 
@@ -98,11 +103,11 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
     def group_members(self) -> list[str] | None:
         """Every room currently on the same input (this room first). None when it plays alone."""
         state = self._state
-        if state is None or state.source is None:
+        if state is None or not self._is_on(state):
             return None
         members = [self.entity_id]
         for out, other in sorted((self.coordinator.data or {}).items()):
-            if out != self._output and other.source == state.source:
+            if out != self._output and self._is_on(other) and other.source == state.source:
                 entity_id = self.coordinator.entity_ids.get(out)
                 if entity_id:
                     members.append(entity_id)
@@ -122,7 +127,7 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
         await self.coordinator.async_turn_on(self._output)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.async_set_source(self._output, None)
+        await self.coordinator.async_turn_off(self._output)
 
     async def async_set_volume_level(self, volume: float) -> None:
         await self.coordinator.async_set_volume_value(self._output, round(volume * 100))
@@ -151,7 +156,7 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
     async def async_join_players(self, group_members: list[str]) -> None:
         """Put the listed rooms on the same input as this room (or the default input if this room is off)."""
         state = self._state
-        source = state.source if state and state.source else self.coordinator.default_input
+        source = state.source if state and self._is_on(state) else self.coordinator.default_input
         wanted: list[int] = []
         by_entity = {entity_id: out for out, entity_id in self.coordinator.entity_ids.items()}
         for entity_id in group_members:
@@ -164,4 +169,4 @@ class TriadRoom(CoordinatorEntity[TriadCoordinator], MediaPlayerEntity):
         await self.coordinator.async_route(wanted, source)
 
     async def async_unjoin_player(self) -> None:
-        await self.coordinator.async_set_source(self._output, None)
+        await self.coordinator.async_turn_off(self._output)

@@ -32,3 +32,8 @@ input gain `FF 55 04 02 04`; parametric EQ under prefix `FF 56`. On that driver 
 ## Behaviour notes
 - The amp sends no unsolicited updates: the integration polls (default every 10 s). Changes made by Control4 or a wall keypad show up on the next poll.
 - A second client may compete with the Control4 controller; the integration therefore uses short sessions and starts in read only monitor mode.
+
+## How Control4 leaves the amp (probe, 2026-10-16 15:40)
+Control4 does not use Audio Off. A room that is "off" stays routed to input 5 with the volume at the floor (-108.5 dB; one room also muted).
+Playing rooms were at -55.6 dB. The integration therefore treats a room as ON only when it is routed AND above the volume floor, turns a room on by routing it and raising it to its last real volume (default 10, about -55 dB), and uses Audio Off for its own "off".
+Polling check: 30 queries on ONE connection returned clean in 0.31 s; five back-to-back sessions were fine.

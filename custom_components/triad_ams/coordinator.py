@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_INPUT,
     DEFAULT_INPUTS,
     DEFAULT_MODE,
+    DEFAULT_ON_VOLUME,
     DEFAULT_OUTPUTS,
     DEFAULT_POLL_SECONDS,
     DOMAIN,
@@ -61,6 +62,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self.inputs = _int_keys(options.get(CONF_INPUTS, DEFAULT_INPUTS))
         self.default_input = int(options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT))
         self.entity_ids: dict[int, str] = {}           # output -> media_player entity id (filled by the entities)
+        self.last_volume: dict[int, int] = {}          # output -> last volume above the floor, used by turn_on
         self.last_source: dict[int, int] = {}          # output -> last real source, used by turn_on
         self._store: Store = Store(hass, SNAPSHOT_STORAGE_VERSION, f"{SNAPSHOT_KEY}.{entry.entry_id}")
 
@@ -87,9 +89,22 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         except TriadError as err:
             raise UpdateFailed(str(err)) from err
         for out, state in states.items():
-            if state.source is not None:
-                self.last_source[out] = state.source
+            self._remember(out, state)
         return states
+
+    def _remember(self, out: int, state: OutputState) -> None:
+        if state.source is not None:
+            self.last_source[out] = state.source
+        if state.volume_value:
+            self.last_volume[out] = state.volume_value
+
+    def _on_volume(self, out: int) -> int:
+        return self.last_volume.get(out) or DEFAULT_ON_VOLUME
+
+    def _needs_volume(self, out: int) -> bool:
+        """True if the room sits at the volume floor (Control4's idea of off), so switching it on must raise it."""
+        state = (self.data or {}).get(out)
+        return state is None or not state.volume_value
 
     async def _refresh_outputs(self, outputs: list[int]) -> None:
         """Re-read a few outputs right after a write so the UI shows the amp's own answer."""
@@ -102,8 +117,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         data = dict(self.data or {})
         data.update(fresh)
         for out, state in fresh.items():
-            if state.source is not None:
-                self.last_source[out] = state.source
+            self._remember(out, state)
         self.async_set_updated_data(data)
 
     # ---------- writes (all go through _send) ----------
@@ -125,17 +139,30 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
     async def async_set_mute(self, output: int, mute: bool) -> None:
         await self._send([protocol.mute_frame(output, mute)], [output])
 
+    def _on_frames(self, out: int, input_number: int) -> list[bytes]:
+        frames = [protocol.source_frame(out, input_number)]
+        if self._needs_volume(out):
+            frames.append(protocol.volume_frame(out, self._on_volume(out)))   # also clears mute
+        else:
+            frames.append(protocol.mute_frame(out, False))
+        return frames
+
     async def async_turn_on(self, output: int, input_number: int | None = None) -> None:
         source = input_number or self.last_source.get(output) or self.default_input
-        await self._send([protocol.source_frame(output, source), protocol.mute_frame(output, False)], [output])
+        await self._send(self._on_frames(output, source), [output])
+
+    async def async_turn_off(self, output: int) -> None:
+        """Off = Audio Off. (Control4 'off' leaves the route and drops the volume to the floor; both read as off here.)"""
+        await self._send([protocol.source_frame(output, None)], [output])
 
     async def async_route(self, outputs: list[int], input_number: int | None) -> None:
         """Send several outputs to one input (or all off) in one session."""
         frames: list[bytes] = []
         for out in outputs:
-            frames.append(protocol.source_frame(out, input_number))
-            if input_number is not None:
-                frames.append(protocol.mute_frame(out, False))
+            if input_number is None:
+                frames.append(protocol.source_frame(out, None))
+            else:
+                frames.extend(self._on_frames(out, input_number))
         await self._send(frames, outputs)
 
     # ---------- snapshot / restore (the rollback safety net) ----------

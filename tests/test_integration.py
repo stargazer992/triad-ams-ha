@@ -126,3 +126,25 @@ def test_map_parsing():
     from custom_components.triad_ams.config_flow import parse_map
     assert parse_map("1=Living Room\n 5 = Kitchen \n") == {"1": "Living Room", "5": "Kitchen"}
     assert parse_map("25=Nope") is None and parse_map("x=Nope") is None and parse_map("") is None
+
+
+async def test_control4_style_off_reads_as_off_and_turn_on_raises_volume(hass, amp):
+    # What the real house looks like: Control4 'off' = still routed to input 5, volume at the floor.
+    for n in (0, 4, 6):
+        amp.source[n] = 4
+    amp.volume[4] = 10                                  # Kitchen is playing (quiet)
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    living, kitchen, family = _eid(hass, entry, 1), _eid(hass, entry, 5), _eid(hass, entry, 7)
+    assert hass.states.get(living).state == "off"       # routed but at the floor
+    assert hass.states.get(kitchen).state == "on"
+    assert hass.states.get(kitchen).attributes.get("group_members") is None      # alone: the others are 'off'
+    await hass.services.async_call("media_player", "turn_on", {"entity_id": living}, blocking=True)
+    assert amp.volume[0] == 10 and amp.source[0] == 4 and hass.states.get(living).state == "on"
+    await hass.services.async_call("media_player", "volume_set", {"entity_id": living, "volume_level": 0.5}, blocking=True)
+    await hass.services.async_call("media_player", "turn_off", {"entity_id": living}, blocking=True)
+    assert amp.source[0] == 0x18
+    await hass.services.async_call("media_player", "turn_on", {"entity_id": living}, blocking=True)
+    assert amp.volume[0] == 50                          # remembered the last real volume
+    # joining wakes rooms that sit at the floor
+    await hass.services.async_call("media_player", "join", {"entity_id": kitchen, "group_members": [family]}, blocking=True)
+    assert amp.volume[6] == 10 and hass.states.get(family).state == "on"

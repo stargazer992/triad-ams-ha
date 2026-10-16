@@ -19,6 +19,7 @@ DEFAULT_PORT = 52000
 DEFAULT_POLL_SECONDS = 10
 MIN_POLL_SECONDS = 3
 DEFAULT_INPUT = 5
+DEFAULT_ON_VOLUME = 10        # amp volume value (0..100, about -55 dB) used when a room is turned on and has no remembered volume
 
 # Outputs verified on 2026-10-14 by nudging each room's volume (see docs/protocol.md).
 DEFAULT_OUTPUTS = {

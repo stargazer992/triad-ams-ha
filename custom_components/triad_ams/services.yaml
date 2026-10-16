@@ -1,0 +1,21 @@
+# Services of the Triad AMS integration. Writes need CONTROL mode (options); snapshot is read only.
+snapshot:
+  # Save source, volume and mute of every configured room to disk (read only). Taken automatically
+  # when you switch to control mode; run it again before big changes.
+restore_snapshot:
+  # Put every room back exactly as the last snapshot (rollback of the audio state).
+all_off:
+  # Switch every configured room to Audio Off.
+party:
+  fields:
+    input:
+      selector:
+        number:
+          min: 1
+          max: 24
+    volume:
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01

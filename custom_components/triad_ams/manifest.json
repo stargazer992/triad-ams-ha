@@ -1,0 +1,15 @@
+{
+  "domain": "triad_ams",
+  "name": "Triad AMS Audio Matrix",
+  "codeowners": [
+    "@stargazer992"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/stargazer992/triad-ams-ha",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/stargazer992/triad-ams-ha/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -41,7 +41,7 @@ async def test_monitor_mode_reads_and_never_writes(hass, amp):
     assert hass.states.get(_eid(hass, entry, 1)).state == "off"
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call("media_player", "volume_set", {"entity_id": _eid(hass, entry, 5), "volume_level": 0.2}, blocking=True)
-    assert all(f[4] in (0x1D, 0x1E, 0x17) and f[5] == 0xF5 for f in amp.frames)    # only GET frames were ever sent
+    assert all(f[4] in (0x1D, 0x1E, 0x17, 0x2F, 0x30, 0x31) and f[5] == 0xF5 for f in amp.frames)    # only GET frames were ever sent
 
 
 async def test_control_mode_commands(hass, amp):
@@ -161,3 +161,49 @@ async def test_join_unmutes_even_if_amp_ignores_unmute_after_source_change(hass,
     assert amp.source[0] == 4
     assert amp.muted[0] is False                        # the retry fixed it
     assert hass.states.get(living).attributes["is_volume_muted"] is False
+
+
+def _nid(hass, entry, out, kind):
+    return er.async_get(hass).async_get_entity_id("number", DOMAIN, f"{entry.entry_id}_out{out}_{kind}")
+
+
+async def test_tone_sliders_read_and_set(hass, amp):
+    amp.eq[(0x2F, 4)] = 0x18 + 6                         # Kitchen bass already +3 dB on the amp
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    bass = _nid(hass, entry, 5, "bass")
+    assert hass.states.get(bass).state == "3.0"          # real value read at startup
+    assert hass.states.get(_nid(hass, entry, 1, "balance")).state == "0.0"
+    assert len([s for s in hass.states.async_all("number")]) == 9    # 3 rooms x 3 controls
+    assert bass == "number.kitchen_bass"                              # named after the room, like its media player
+    await hass.services.async_call("number", "set_value", {"entity_id": bass, "value": -4}, blocking=True)
+    assert amp.eq[(0x2F, 4)] == 0x18 - 8                 # amp holds -4 dB
+    assert hass.states.get(bass).state == "-4.0"         # shown straight away
+    await hass.services.async_call("number", "set_value", {"entity_id": _nid(hass, entry, 7, "balance"), "value": 2}, blocking=True)
+    assert amp.eq[(0x31, 6)] == 0x18 + 4 and amp.eq[(0x31, 4)] == 0x18      # only Family Room balance moved
+
+
+async def test_tone_set_refused_in_monitor_mode(hass, amp):
+    entry = await _setup(hass, amp, MODE_MONITOR)
+    bass = _nid(hass, entry, 5, "bass")
+    assert hass.states.get(bass).state == "0.0"
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call("number", "set_value", {"entity_id": bass, "value": 5}, blocking=True)
+    assert all(f[5] == 0xF5 for f in amp.frames)         # still only GET frames
+    assert amp.eq[(0x2F, 4)] == 0x18
+
+
+async def test_tone_read_failure_keeps_media_players(hass, amp):
+    """A failing tone read must not take the room players down."""
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    coordinator = entry.runtime_data
+    from custom_components.triad_ams.client import TriadError
+
+    async def boom(outputs):
+        raise TriadError("tone read exploded")
+
+    coordinator.client.read_eq = boom
+    coordinator._eq_next = 0.0
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success                                   # main poll unaffected
+    assert hass.states.get(_eid(hass, entry, 5)).state != "unavailable"
+    assert hass.states.get(_nid(hass, entry, 5, "bass")).state == "0.0"      # last known tone value kept

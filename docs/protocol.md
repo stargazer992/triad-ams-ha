@@ -25,6 +25,14 @@ It is not linear. The integration interpolates between these points; `tools/tria
 1 Living Room, 2 Master Bedroom, 3 Master Laundry, 4 Her Bathroom, 5 Kitchen, 6 Dining, 7 Family Room, 8 Patio, 9 Pool, 10 Bar.
 Outputs 11-24 are Audio Off, volume 0 (unused or not yet mapped). Input 5 = WiiM Ultra.
 
+## Tone controls (bass / treble / balance) - verified on the real unit 2026-10-14, used by v0.2.0
+| Function | Get | Set | Reply |
+|---|---|---|---|
+| Bass | `FF 55 04 03 2F F5 <out>` | `FF 55 04 03 2F <out> <val>` | `Get Out[n] Bass : -3` / `Set Out[n] Bass to 3` |
+| Treble | `... 30 ...` | `... 30 <out> <val>` | `Get Out[n] Treble : 0` |
+| Balance | `... 31 ...` | `... 31 <out> <val>` | `Bal Center`, `Bal R 1` (left is parsed as `Bal L n`, wording not yet seen on the amp) |
+`<val>` = 0x00..0x30, 0x18 = flat/centre, 0.5 dB per step (-12..+12 dB). A read straight after a set can return the old value for a fraction of a second, so the integration shows the written value and confirms it on the next scheduled read.
+
 ## Other frames seen in the AMS-16 driver (https://github.com/tim-weiler/triad-audio-matrix), NOT yet tested here
 Loudness on `FF 55 03 03 1A <out>`, off `FF 55 03 03 1B <out>`; get loudness `FF 55 04 03 1A F5 <out>`;
 input gain `FF 55 04 02 04`; parametric EQ under prefix `FF 56`. On that driver volume is 0..0xA1 and Audio Off is source 16; on the 24x24 volume tops out at 100 and Audio Off is 24 (0x18).

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from .const import (
     DEFAULT_OUTPUTS,
     DEFAULT_POLL_SECONDS,
     DOMAIN,
+    EQ_POLL_SECONDS,
     MIN_POLL_SECONDS,
     MODE_CONTROL,
     SNAPSHOT_KEY,
@@ -65,6 +67,8 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self.entity_ids: dict[int, str] = {}           # output -> media_player entity id (filled by the entities)
         self.last_volume: dict[int, int] = {}          # output -> last volume above the floor, used by turn_on
         self.last_source: dict[int, int] = {}          # output -> last real source, used by turn_on
+        self.eq: dict[int, dict[str, float | None]] = {}   # output -> {bass|treble|balance: dB}; read every EQ_POLL_SECONDS
+        self._eq_next = 0.0                                 # monotonic time the next tone read is due
         self._store: Store = Store(hass, SNAPSHOT_STORAGE_VERSION, f"{SNAPSHOT_KEY}.{entry.entry_id}")
 
     # ---------- mode ----------
@@ -91,7 +95,29 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             raise UpdateFailed(str(err)) from err
         for out, state in states.items():
             self._remember(out, state)
+        await self._poll_eq()
         return states
+
+    async def _poll_eq(self, force: bool = False) -> None:
+        """Read tone settings when due. Never fails the main poll: on error keep the last known values."""
+        now = time.monotonic()
+        if not force and now < self._eq_next:
+            return
+        try:
+            fresh = await self.client.read_eq(sorted(self.outputs))
+        except TriadError as err:
+            _LOGGER.debug("Tone read failed, keeping last values: %s", err)
+            self._eq_next = now + MIN_POLL_SECONDS * 3        # try again soon, not on every poll
+            return
+        for out, kinds in fresh.items():
+            merged = dict(self.eq.get(out, {}))
+            for kind, value in kinds.items():
+                if value is not None:
+                    merged[kind] = value
+                else:
+                    merged.setdefault(kind, None)
+            self.eq[out] = merged
+        self._eq_next = now + EQ_POLL_SECONDS
 
     def _remember(self, out: int, state: OutputState) -> None:
         if state.source is not None:
@@ -139,6 +165,20 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
 
     async def async_set_mute(self, output: int, mute: bool) -> None:
         await self._send([protocol.mute_frame(output, mute)], [output])
+
+    async def async_set_eq(self, output: int, kind: str, db: float) -> None:
+        """Set bass / treble / balance (dB). The amp's read-back lags a set, so the new value is shown right away
+        and confirmed by the next scheduled tone read."""
+        if kind not in protocol.EQ_KINDS:
+            raise HomeAssistantError(f"Unknown tone control {kind!r}")
+        self._require_control()
+        value = protocol.snap_eq_db(db)
+        try:
+            await self.client.write([protocol.eq_set_frame(kind, output, value)])
+        except TriadError as err:
+            raise HomeAssistantError(str(err)) from err
+        self.eq.setdefault(output, {})[kind] = value
+        self.async_update_listeners()
 
     def _on_frames(self, out: int, input_number: int) -> list[bytes]:
         frames = [protocol.source_frame(out, input_number)]

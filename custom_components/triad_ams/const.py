@@ -16,6 +16,7 @@ MODE_CONTROL = "control"                  # HA drives the amp
 DEFAULT_MODE = MODE_MONITOR
 
 DEFAULT_PORT = 52000
+EQ_POLL_SECONDS = 300         # bass / treble / balance rarely change: read them every 5 minutes, not every poll
 DEFAULT_POLL_SECONDS = 10
 MIN_POLL_SECONDS = 3
 DEFAULT_INPUT = 5

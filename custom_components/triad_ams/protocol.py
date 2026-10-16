@@ -11,6 +11,9 @@ Commands:
     0x17 mute     value ignored
     0x18 unmute   value ignored
     0x16 volume down 3 dB (value ignored)
+    0x2F bass     value = 0x18 + 2*dB  (0x00..0x30 = -12..+12 dB in 0.5 dB steps, 0x18 = flat)
+    0x30 treble   same encoding
+    0x31 balance  same encoding, 0x18 = centre, above = right, below = left
 Replies are plain text, null terminated. Output bytes are zero based (byte 0 = "Out[1]").
 """
 from __future__ import annotations
@@ -26,6 +29,18 @@ CMD_MUTE = 0x17
 CMD_UNMUTE = 0x18
 CMD_SOURCE = 0x1D
 CMD_VOLUME = 0x1E
+
+CMD_BASS = 0x2F
+CMD_TREBLE = 0x30
+CMD_BALANCE = 0x31
+
+# Tone controls (v0.2.0). Order is the order they are read and shown.
+EQ_KINDS = ("bass", "treble", "balance")
+EQ_COMMANDS = {"bass": CMD_BASS, "treble": CMD_TREBLE, "balance": CMD_BALANCE}
+EQ_FLAT_BYTE = 0x18                     # 0 dB / centre
+EQ_MAX_BYTE = 0x30
+EQ_MIN_DB = -12.0
+EQ_MAX_DB = 12.0
 
 AUDIO_OFF_VALUE = 0x18                  # source value meaning "Audio Off"
 MAX_OUTPUTS = 24
@@ -84,10 +99,36 @@ def mute_frame(output: int, mute: bool) -> bytes:
     return set_frame(CMD_MUTE if mute else CMD_UNMUTE, output, 1 if mute else 0)
 
 
+def db_to_eq_byte(db: float) -> int:
+    """dB (-12..+12, 0.5 steps) -> amp byte. Out of range values are clamped."""
+    db = max(EQ_MIN_DB, min(EQ_MAX_DB, float(db)))
+    return max(0, min(EQ_MAX_BYTE, round(EQ_FLAT_BYTE + 2 * db)))
+
+
+def eq_byte_to_db(value: int) -> float:
+    return (int(value) - EQ_FLAT_BYTE) / 2
+
+
+def snap_eq_db(db: float) -> float:
+    """The value the amp will really hold for a requested dB."""
+    return eq_byte_to_db(db_to_eq_byte(db))
+
+
+def eq_get_frame(kind: str, output: int) -> bytes:
+    return get_frame(EQ_COMMANDS[kind], output)
+
+
+def eq_set_frame(kind: str, output: int, db: float) -> bytes:
+    return set_frame(EQ_COMMANDS[kind], output, db_to_eq_byte(db))
+
+
 _SRC = re.compile(r"Out\[(\d+)\]\s+Input Source\s*:\s*(.+)", re.I)
 _VOL = re.compile(r"Out\[(\d+)\]\s+Volume\s*:\s*(-?\d+(?:\.\d+)?)", re.I)
 _MUTE = re.compile(r"Out\[(\d+)\]\s+Mute status\s*:\s*(\w+)", re.I)
 _INPUT = re.compile(r"input\s+(\d+)", re.I)
+_EQ = re.compile(r"Out\[(\d+)\]\s+(Bass|Treble|Balance)\s*:?\s*(?:to\s+)?(.+)", re.I)
+_BAL = re.compile(r"Bal(?:ance)?\s*(Center|Centre|[LR])?\s*(-?\d+(?:\.\d+)?)?", re.I)
+_NUM = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 @dataclass
@@ -127,3 +168,31 @@ def parse_reply(text: str, state: OutputState) -> bool:
 
 def is_error(text: str) -> bool:
     return "command error" in text.lower()
+
+
+def parse_eq(kind: str, text: str) -> float | None:
+    """Parse a Get/Set reply for a tone control into dB (balance: + right, - left). None if not understood.
+
+    Bass / treble replies look like 'Get Out[2] Bass : -3' (and 'Set Out[2] Bass to 3').
+    Balance replies look like 'Bal Center', 'Bal R 1' or 'Bal L 4'.
+    """
+    text = text.replace("\x00", " ").strip()
+    match = _EQ.search(text)
+    if not match or match.group(2).lower() != kind:
+        return None
+    body = match.group(3).strip()
+    if kind == "balance":
+        bal = _BAL.search(body)
+        if not bal:
+            return None
+        side, num = bal.group(1), bal.group(2)
+        if side and side.lower().startswith("c"):
+            return 0.0
+        if side and num is not None:
+            amount = abs(float(num))
+            return amount if side.upper() == "R" else -amount
+        if num is not None:                      # plain signed number
+            return float(num)
+        return None
+    found = _NUM.search(body)
+    return float(found.group(0)) if found else None

@@ -29,9 +29,21 @@ class FakeAmp:
         self.one_shot = False                              # True = hang up after every reply (worst-case firmware)
         self.ignore_mute_after_source = 0.0               # seconds; a (un)mute this soon after a source change is acknowledged but ignored
         self._source_changed: dict[int, float] = {}
+        self.eq = {(c, n): 0x18 for c in (0x2F, 0x30, 0x31) for n in range(24)}   # bass / treble / balance, 0x18 = flat
         self.silent = False                                # True = accept but never answer
         self._server: asyncio.AbstractServer | None = None
         self.port = 0
+
+    @staticmethod
+    def _eq_name(cmd: int) -> str:
+        return {0x2F: "Bass", 0x30: "Treble", 0x31: "Balance"}[cmd]
+
+    @staticmethod
+    def _eq_text(cmd: int, value: int) -> str:
+        db = (value - 0x18) / 2
+        if cmd == 0x31:
+            return "Bal Center" if db == 0 else f"Bal {'R' if db > 0 else 'L'} {abs(db):g}"
+        return f"{db:g}"
 
     async def start(self) -> int:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -60,8 +72,15 @@ class FakeAmp:
                 return f"Get Out[{n}] Volume : {_fmt(_db(self.volume[out]))}"
             if cmd == 0x17:
                 return f"Get Out[{n}] Mute status : " + ("mute" if self.muted[out] else "Unmute")
+            if cmd in (0x2F, 0x30, 0x31):
+                return f"Get Out[{n}] {self._eq_name(cmd)} : {self._eq_text(cmd, self.eq[(cmd, out)])}"
             return "Command error"
         value = frame[6] if len(frame) > 6 else 0
+        if cmd in (0x2F, 0x30, 0x31):
+            if value > 0x30:
+                return "Command error"
+            self.eq[(cmd, out)] = value
+            return f"Set Out[{n}] {self._eq_name(cmd)} to {self._eq_text(cmd, value)}"
         if cmd == 0x1D:
             if value > 0x18:
                 return "Command error"

@@ -100,6 +100,26 @@ class TriadClient:
                 _LOGGER.debug("Unparsed reply for Out[%d]: %r", out, reply)
         return states
 
+    async def read_eq(self, outputs: list[int]) -> dict[int, dict[str, float | None]]:
+        """Read bass, treble and balance (dB) of the given 1-based outputs in one session.
+
+        A value the amp did not answer, or that could not be parsed, is None.
+        """
+        frames: list[bytes] = []
+        owners: list[tuple[int, str]] = []
+        for out in outputs:
+            for kind in protocol.EQ_KINDS:
+                frames.append(protocol.eq_get_frame(kind, out))
+                owners.append((out, kind))
+        replies = await self._run(frames)
+        result: dict[int, dict[str, float | None]] = {out: {} for out in outputs}
+        for (out, kind), reply in zip(owners, replies):
+            value = protocol.parse_eq(kind, reply) if reply else None
+            if reply and value is None:
+                _LOGGER.debug("Unparsed %s reply for Out[%d]: %r", kind, out, reply)
+            result[out][kind] = value
+        return result
+
     async def write(self, frames: list[bytes]) -> list[str]:
         """Send set frames; raises TriadError if the amp answers 'Command error' or nothing."""
         replies = await self._run(frames, write=True)

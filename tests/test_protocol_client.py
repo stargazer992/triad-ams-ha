@@ -76,3 +76,38 @@ async def test_amp_that_hangs_up_after_every_reply(amp):
     assert len(states) == 3 and all(s.complete for s in states.values())
     await client.write([protocol.source_frame(2, 5), protocol.volume_frame(2, 50)])
     assert amp.source[1] == 4 and amp.volume[1] == 50
+
+
+def test_eq_encoding():
+    assert protocol.db_to_eq_byte(0) == 0x18 and protocol.db_to_eq_byte(1) == 0x1A
+    assert protocol.db_to_eq_byte(-12) == 0 and protocol.db_to_eq_byte(12) == 0x30
+    assert protocol.db_to_eq_byte(99) == 0x30 and protocol.db_to_eq_byte(-99) == 0       # clamped
+    assert protocol.db_to_eq_byte(0.5) == 0x19 and protocol.snap_eq_db(0.3) == 0.5
+    assert protocol.eq_byte_to_db(0x15) == -1.5
+    assert protocol.eq_get_frame("bass", 10) == bytes.fromhex("ff5504032ff509")
+    assert protocol.eq_set_frame("treble", 10, 3) == bytes.fromhex("ff55040330091e")
+    assert protocol.eq_set_frame("balance", 1, 0) == bytes.fromhex("ff55040331 0018".replace(" ", ""))
+
+
+def test_parse_eq_replies():
+    assert protocol.parse_eq("bass", "Get Out[2] Bass : -3") == -3.0
+    assert protocol.parse_eq("bass", "Get Out[2] Bass : 0.5") == 0.5
+    assert protocol.parse_eq("bass", "Set Out[2] Bass to 3") == 3.0
+    assert protocol.parse_eq("treble", "Get Out[2] Treble : 0") == 0.0
+    assert protocol.parse_eq("balance", "Get Out[2] Balance : Bal Center") == 0.0
+    assert protocol.parse_eq("balance", "Get Out[2] Balance : Bal R 1") == 1.0
+    assert protocol.parse_eq("balance", "Get Out[2] Balance : Bal L 4") == -4.0
+    assert protocol.parse_eq("balance", "Set Out[10] Balance to Bal R 1") == 1.0
+    assert protocol.parse_eq("bass", "Command error") is None
+    assert protocol.parse_eq("bass", "Get Out[2] Treble : 3") is None                      # wrong kind
+
+
+async def test_eq_read_write_roundtrip(amp):
+    client = TriadClient("127.0.0.1", amp.port)
+    base = await client.read_eq([1, 10])
+    assert base == {1: {"bass": 0.0, "treble": 0.0, "balance": 0.0}, 10: {"bass": 0.0, "treble": 0.0, "balance": 0.0}}
+    await client.write([protocol.eq_set_frame("bass", 10, 3), protocol.eq_set_frame("treble", 10, -2),
+                        protocol.eq_set_frame("balance", 10, -4)])
+    res = await client.read_eq([10, 1])
+    assert res[10] == {"bass": 3.0, "treble": -2.0, "balance": -4.0}
+    assert res[1] == {"bass": 0.0, "treble": 0.0, "balance": 0.0}                           # other outputs untouched

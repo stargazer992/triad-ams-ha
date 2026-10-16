@@ -30,7 +30,7 @@ from .coordinator import TriadConfigEntry, TriadCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.MEDIA_PLAYER]
+PLATFORMS = [Platform.MEDIA_PLAYER, Platform.NUMBER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TriadConfigEntry) -> bool:

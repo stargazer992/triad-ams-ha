@@ -1,10 +1,12 @@
+<p align="center"><img src="custom_components/triad_ams/brand/logo.png" alt="Triad" width="320"></p>
+
 # Triad AMS audio matrix for Home Assistant
 
 A HACS custom integration for the Triad AMS (tested on the 24x24) over TCP. It makes one media player per room with
 volume, mute, on/off, source selection and grouping, so the house can run without Control4. A WiiM (or any source on an amp input)
 feeds the matrix; Home Assistant routes it to rooms.
 
-**Status: v0.1.1, tested against a simulated amp and verified against the real unit's protocol. Not yet run inside the house, so it starts read only.**
+**Status: v0.1.3, tested against a simulated amp and verified against the real unit's protocol. Not yet run inside the house, so it starts read only.**
 
 - **Safe by default**: a new entry only reads (monitor mode). You switch to control mode in the options, which saves a snapshot first.
 - **Rollback**: options > roll back to monitor; `triad_ams.restore_snapshot`; or `tools/triad_rollback.py` without Home Assistant. See `docs/rollback.md`.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import time
 
 VOLUME_POINTS = [(0, -108.5), (8, -61.0), (16, -47.7), (32, -34.0), (48, -22.5), (64, -13.1), (72, -9.3), (80, -6.0), (88, -3.3), (96, -1.1), (100, 0.0)]
 
@@ -26,6 +27,8 @@ class FakeAmp:
         self.connections = 0
         self.frames: list[bytes] = []
         self.one_shot = False                              # True = hang up after every reply (worst-case firmware)
+        self.ignore_mute_after_source = 0.0               # seconds; a (un)mute this soon after a source change is acknowledged but ignored
+        self._source_changed: dict[int, float] = {}
         self.silent = False                                # True = accept but never answer
         self._server: asyncio.AbstractServer | None = None
         self.port = 0
@@ -63,6 +66,7 @@ class FakeAmp:
             if value > 0x18:
                 return "Command error"
             self.source[out] = value
+            self._source_changed[out] = time.monotonic()
             return f"Set Out[{n}] Input Source to " + ("Audio Off" if value == 0x18 else f"input {value + 1}")
         if cmd == 0x1E:
             if value > 100:
@@ -70,12 +74,11 @@ class FakeAmp:
             self.volume[out] = value
             self.muted[out] = False                        # setting the volume clears mute (verified)
             return f"Set Out[{n}] Output Volume to {_fmt(_db(value))}"
-        if cmd == 0x17:
-            self.muted[out] = True
-            return f"Set Out[{n}] Mute"
-        if cmd == 0x18:
-            self.muted[out] = False
-            return f"Set Out[{n}] Unmute"
+        if cmd in (0x17, 0x18):
+            recent = time.monotonic() - self._source_changed.get(out, -1e9) < self.ignore_mute_after_source
+            if not recent:
+                self.muted[out] = cmd == 0x17
+            return f"Set Out[{n}] " + ("Mute" if cmd == 0x17 else "Unmute")
         if cmd == 0x16:
             self.volume[out] = max(0, self.volume[out] - 3)
             return f"Set Out[{n}] Volume -3db"

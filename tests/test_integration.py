@@ -148,3 +148,16 @@ async def test_control4_style_off_reads_as_off_and_turn_on_raises_volume(hass, a
     # joining wakes rooms that sit at the floor
     await hass.services.async_call("media_player", "join", {"entity_id": kitchen, "group_members": [family]}, blocking=True)
     assert amp.volume[6] == 10 and hass.states.get(family).state == "on"
+
+
+async def test_join_unmutes_even_if_amp_ignores_unmute_after_source_change(hass, amp):
+    # Real amp behaviour seen on the Bar: an unmute right after a source change is acknowledged but ignored.
+    amp.ignore_mute_after_source = 0.15
+    amp.source[4], amp.volume[4] = 4, 10               # Kitchen playing
+    amp.volume[0], amp.muted[0] = 13, True              # Living Room: off (Audio Off) and muted, as the Bar was
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    kitchen, living = _eid(hass, entry, 5), _eid(hass, entry, 1)
+    await hass.services.async_call("media_player", "join", {"entity_id": kitchen, "group_members": [living]}, blocking=True)
+    assert amp.source[0] == 4
+    assert amp.muted[0] is False                        # the retry fixed it
+    assert hass.states.get(living).attributes["is_volume_muted"] is False

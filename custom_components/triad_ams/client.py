@@ -16,6 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 4.0
 REPLY_TIMEOUT = 2.0
+WRITE_SETTLE = 0.25           # pause after each SET frame: a frame sent right after a source change was ignored by the amp
 
 
 class TriadError(Exception):
@@ -47,7 +48,7 @@ class TriadClient:
             raise TriadError(f"Connection lost: {err}") from err
         return data.decode("latin-1").strip("\x00").strip()
 
-    async def _run(self, frames: list[bytes]) -> list[str]:
+    async def _run(self, frames: list[bytes], write: bool = False) -> list[str]:
         """Send frames in order, one reply each, on one connection.
 
         Not every AMS firmware is known to answer several commands per connection. If the amp goes silent
@@ -69,6 +70,8 @@ class TriadClient:
                         reader, writer = await self._open()
                         reply = await self._exchange(reader, writer, frame)
                     replies.append(reply)
+                    if write:
+                        await asyncio.sleep(WRITE_SETTLE)
                 return replies
             except (OSError, ConnectionError) as err:
                 raise TriadError(f"Communication error: {err}") from err
@@ -99,7 +102,7 @@ class TriadClient:
 
     async def write(self, frames: list[bytes]) -> list[str]:
         """Send set frames; raises TriadError if the amp answers 'Command error' or nothing."""
-        replies = await self._run(frames)
+        replies = await self._run(frames, write=True)
         for frame, reply in zip(frames, replies):
             if not reply or protocol.is_error(reply):
                 raise TriadError(f"Amp rejected {frame.hex(' ')}: {reply!r}")

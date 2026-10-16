@@ -148,9 +148,21 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             frames.append(protocol.mute_frame(out, False))
         return frames
 
+    async def _ensure_unmuted(self, outputs: list[int]) -> None:
+        """After waking rooms, make sure none stayed muted. The amp can ignore an unmute that follows a source change."""
+        stuck = [out for out in outputs if (self.data or {}).get(out) and self.data[out].muted]
+        if not stuck:
+            return
+        _LOGGER.debug("Outputs %s still muted after waking, retrying unmute", stuck)
+        await self._send([protocol.mute_frame(out, False) for out in stuck], stuck)
+        still = [out for out in stuck if (self.data or {}).get(out) and self.data[out].muted]
+        if still:
+            _LOGGER.warning("Triad outputs %s stayed muted after two unmute attempts", still)
+
     async def async_turn_on(self, output: int, input_number: int | None = None) -> None:
         source = input_number or self.last_source.get(output) or self.default_input
         await self._send(self._on_frames(output, source), [output])
+        await self._ensure_unmuted([output])
 
     async def async_turn_off(self, output: int) -> None:
         """Off = Audio Off. (Control4 'off' leaves the route and drops the volume to the floor; both read as off here.)"""
@@ -165,6 +177,8 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             else:
                 frames.extend(self._on_frames(out, input_number))
         await self._send(frames, outputs)
+        if input_number is not None:
+            await self._ensure_unmuted(outputs)
 
     # ---------- snapshot / restore (the rollback safety net) ----------
     async def async_snapshot(self) -> dict[str, Any]:

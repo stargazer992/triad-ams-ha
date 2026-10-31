@@ -348,10 +348,10 @@ async def test_reconfigure_changes_address_and_keeps_options(hass, amp):
         flow = await entry.start_reconfigure_flow(hass)
         flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: 1})
         assert flow["errors"] == {"base": "cannot_connect"}
-        flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_HOST: "localhost", CONF_PORT: other.port})
+        flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: other.port})
         assert flow["type"] == "abort" and flow["reason"] == "reconfigure_successful"
         await hass.async_block_till_done()
-        assert entry.data == {CONF_HOST: "localhost", CONF_PORT: other.port} and entry.unique_id == "localhost"
+        assert entry.data == {CONF_HOST: "127.0.0.1", CONF_PORT: other.port}
         assert entry.options[CONF_MODE] == MODE_CONTROL and entry.options[CONF_OUTPUTS] == ROOMS
         assert other.connections > 0
     finally:
@@ -366,9 +366,9 @@ async def test_services_target_one_amp(hass, amp):
         first = await _setup(hass, amp, MODE_CONTROL)
         entry = MockConfigEntry(
             domain=DOMAIN,
-            data={CONF_HOST: "localhost", CONF_PORT: second.port},
+            data={CONF_HOST: "127.0.0.1", CONF_PORT: second.port},
             options={CONF_MODE: MODE_CONTROL, CONF_OUTPUTS: ROOMS, CONF_INPUTS: SOURCES, CONF_DEFAULT_INPUT: 5, CONF_POLL_SECONDS: 10},
-            unique_id="localhost",
+            unique_id="second-amp",
         )
         entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(entry.entry_id)

@@ -19,7 +19,8 @@ Replies are plain text, null terminated. Output bytes are zero based (byte 0 = "
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import pairwise
 
 PREFIX = bytes([0xFF, 0x55, 0x04, 0x03])
 GET_FLAG = 0xF5
@@ -55,25 +56,68 @@ VOLUME_POINTS: list[tuple[int, float]] = [
 ]
 
 
+VOLUME_MATCH_DB = 0.05                  # the amp reports dB with one decimal
+
+
+class VolumeCurve:
+    """Amp volume value (0..100) <-> dB.
+
+    Starts from the measured VOLUME_POINTS and learns the exact dB of every value the amp reports in a
+    'Set Out[n] Output Volume to <dB>' reply. A dB that matches a known point maps back to exactly that
+    value, so a volume Home Assistant wrote reads back as the same value (no drift on turn on / steps).
+    """
+
+    def __init__(self, learned: dict[int, float] | None = None) -> None:
+        self.learned: dict[int, float] = {}
+        self.dirty = False
+        for value, db in (learned or {}).items():
+            self.learn(int(value), float(db))
+        self.dirty = False
+
+    def learn(self, value: int, db: float) -> None:
+        if 0 <= value <= VOLUME_MAX and self.learned.get(value) != db:
+            self.learned[value] = db
+            self.dirty = True
+
+    def points(self) -> list[tuple[int, float]]:
+        merged = dict(VOLUME_POINTS)
+        merged.update(self.learned)
+        return sorted(merged.items())
+
+    def to_db(self, value: int) -> float:
+        value = max(0, min(VOLUME_MAX, int(value)))
+        points = self.points()
+        for (v0, d0), (v1, d1) in pairwise(points):
+            if v0 <= value <= v1:
+                return d0 + (d1 - d0) * (value - v0) / (v1 - v0)
+        return 0.0
+
+    def to_value(self, db: float) -> int:
+        points = self.points()
+        nearest = min(points, key=lambda p: abs(p[1] - db))
+        if abs(nearest[1] - db) <= VOLUME_MATCH_DB:
+            return nearest[0]
+        if db <= points[0][1]:
+            return points[0][0]
+        if db >= points[-1][1]:
+            return VOLUME_MAX
+        for (v0, d0), (v1, d1) in pairwise(points):
+            if d0 <= db <= d1:
+                return round(v0 + (v1 - v0) * (db - d0) / (d1 - d0))
+        return 0
+
+
+_DEFAULT_CURVE = VolumeCurve()
+
+
 def value_to_db(value: int) -> float:
-    """Amp volume value (0..100) -> dB."""
-    value = max(0, min(VOLUME_MAX, int(value)))
-    for (v0, d0), (v1, d1) in zip(VOLUME_POINTS, VOLUME_POINTS[1:]):
-        if v0 <= value <= v1:
-            return d0 + (d1 - d0) * (value - v0) / (v1 - v0)
-    return 0.0
+    """Amp volume value (0..100) -> dB, from the measured points only."""
+    return _DEFAULT_CURVE.to_db(value)
 
 
 def db_to_value(db: float) -> int:
-    """dB -> nearest amp volume value (0..100)."""
-    if db <= VOLUME_POINTS[0][1]:
-        return 0
-    if db >= VOLUME_POINTS[-1][1]:
-        return VOLUME_MAX
-    for (v0, d0), (v1, d1) in zip(VOLUME_POINTS, VOLUME_POINTS[1:]):
-        if d0 <= db <= d1:
-            return round(v0 + (v1 - v0) * (db - d0) / (d1 - d0))
-    return 0
+    """dB -> nearest amp volume value (0..100), from the measured points only."""
+    return _DEFAULT_CURVE.to_value(db)
 
 
 def get_frame(cmd: int, output: int) -> bytes:
@@ -129,6 +173,7 @@ _INPUT = re.compile(r"input\s+(\d+)", re.I)
 _EQ = re.compile(r"Out\[(\d+)\]\s+(Bass|Treble|Balance)\s*:?\s*(?:to\s+)?(.+)", re.I)
 _BAL = re.compile(r"Bal(?:ance)?\s*(Center|Centre|[LR])?\s*(-?\d+(?:\.\d+)?)?", re.I)
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
+_SET_VOL = re.compile(r"Out\[(\d+)\]\s+Output Volume to\s*(-?\d+(?:\.\d+)?)", re.I)
 
 
 @dataclass
@@ -137,40 +182,57 @@ class OutputState:
     source: int | None = None       # 1..24, None = Audio Off
     volume_db: float | None = None
     muted: bool | None = None
-
-    @property
-    def volume_value(self) -> int | None:
-        return None if self.volume_db is None else db_to_value(self.volume_db)
+    volume_value: int | None = None     # 0..100, filled from volume_db by the client's VolumeCurve
+    answered: set[str] = field(default_factory=set, compare=False)     # which of source / volume / mute the amp answered
 
     @property
     def complete(self) -> bool:
-        return self.volume_db is not None and self.muted is not None
+        return {"source", "volume", "mute"} <= self.answered
 
 
-def parse_reply(text: str, state: OutputState) -> bool:
-    """Fold one reply into state. Returns True if the reply was understood."""
+def _for_output(match: re.Match, output: int | None) -> bool:
+    return output is None or int(match.group(1)) == output
+
+
+def parse_reply(text: str, state: OutputState, output: int | None = None) -> bool:
+    """Fold one reply into state. Returns True if the reply was understood (and is about output, if given)."""
     text = text.replace("\x00", " ").strip()
     match = _SRC.search(text)
     if match:
+        if not _for_output(match, output):
+            return False
         found = _INPUT.search(match.group(2))
         state.source = int(found.group(1)) if found else None
+        state.answered.add("source")
         return True
     match = _VOL.search(text)
     if match:
+        if not _for_output(match, output):
+            return False
         state.volume_db = float(match.group(2))
+        state.answered.add("volume")
         return True
     match = _MUTE.search(text)
     if match:
+        if not _for_output(match, output):
+            return False
         state.muted = match.group(2).lower() == "mute"
+        state.answered.add("mute")
         return True
     return False
+
+
+def parse_set_volume(text: str) -> tuple[int, float] | None:
+    """'Set Out[n] Output Volume to -13.1' -> (n, -13.1)."""
+    match = _SET_VOL.search(text.replace("\x00", " "))
+    return (int(match.group(1)), float(match.group(2))) if match else None
 
 
 def is_error(text: str) -> bool:
     return "command error" in text.lower()
 
 
-def parse_eq(kind: str, text: str) -> float | None:
+def parse_eq(kind: str, text: str, output: int | None = None) -> float | None:
     """Parse a Get/Set reply for a tone control into dB (balance: + right, - left). None if not understood.
 
     Bass / treble replies look like 'Get Out[2] Bass : -3' (and 'Set Out[2] Bass to 3').
@@ -178,7 +240,7 @@ def parse_eq(kind: str, text: str) -> float | None:
     """
     text = text.replace("\x00", " ").strip()
     match = _EQ.search(text)
-    if not match or match.group(2).lower() != kind:
+    if not match or match.group(2).lower() != kind or not _for_output(match, output):
         return None
     body = match.group(3).strip()
     if kind == "balance":

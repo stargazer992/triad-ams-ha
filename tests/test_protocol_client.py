@@ -1,6 +1,7 @@
 """Protocol + client against the simulated amp (frames match the real unit)."""
 import pytest
 
+import custom_components.triad_ams.client as c
 from custom_components.triad_ams import protocol
 from custom_components.triad_ams.client import TriadClient, TriadError
 
@@ -53,15 +54,67 @@ async def test_one_session_reads_many_outputs(amp):
     assert amp.connections == before + 1
 
 
-async def test_rejected_and_silent_amp_raise(amp):
+async def test_rejected_and_silent_amp_raise(amp, monkeypatch):
     client = TriadClient("127.0.0.1", amp.port)
     with pytest.raises(TriadError):
         await client.write([protocol.set_frame(protocol.CMD_VOLUME, 1, 0x70)])   # > 100 = Command error
     amp.silent = True
-    import custom_components.triad_ams.client as c
-    c.REPLY_TIMEOUT = 0.2
+    monkeypatch.setattr(c, "REPLY_TIMEOUT", 0.2)
     with pytest.raises(TriadError):
         await client.write([protocol.volume_frame(1, 10)])
+
+
+async def test_silent_amp_stops_the_session_early(amp, monkeypatch):
+    """A read must not wait out every frame of a silent amp: give up after the fresh-connection retry."""
+    amp.silent = True
+    monkeypatch.setattr(c, "REPLY_TIMEOUT", 0.2)
+    client = TriadClient("127.0.0.1", amp.port)
+    with pytest.raises(TriadError):
+        await client.read_outputs(list(range(1, 11)))
+    assert len(amp.frames) == 2                      # first frame + its one retry, not 30 frames x 2
+
+
+async def test_send_error_retries_on_fresh_connection(amp, monkeypatch):
+    """A reset while sending (not only while reading) takes the fresh-connection retry."""
+    real = TriadClient._exchange
+    calls = {"n": 0}
+
+    async def flaky(reader, writer, frame):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ConnectionResetError("peer reset")
+        return await real(reader, writer, frame)
+
+    monkeypatch.setattr(TriadClient, "_exchange", staticmethod(flaky))
+    client = TriadClient("127.0.0.1", amp.port)
+    states = await client.read_outputs([1, 2])
+    assert all(s.complete for s in states.values())
+    assert amp.connections == 2
+
+
+def test_replies_must_name_the_asked_output():
+    state = protocol.OutputState()
+    assert not protocol.parse_reply("Get Out[6] Volume : -13.1", state, 5)
+    assert state.volume_db is None and not state.answered
+    assert protocol.parse_reply("Get Out[5] Volume : -13.1", state, 5) and state.answered == {"volume"}
+    assert protocol.parse_eq("bass", "Get Out[3] Bass : 2", 4) is None
+    assert protocol.parse_eq("bass", "Get Out[4] Bass : 2", 4) == 2.0
+
+
+def test_volume_curve_learns_exact_points():
+    curve = protocol.VolumeCurve()
+    assert curve.to_value(-50.5) == 14                # interpolation between measured points is off by one here
+    curve.learn(13, -50.5)                            # what the amp said in 'Set Out[n] Output Volume to -50.5'
+    assert curve.to_value(-50.5) == 13 and curve.dirty
+    assert curve.to_db(13) == -50.5
+    assert protocol.parse_set_volume("Set Out[10] Output Volume to -50.5") == (10, -50.5)
+
+
+async def test_write_learns_the_curve_from_set_replies(amp):
+    client = TriadClient("127.0.0.1", amp.port)
+    await client.write([protocol.volume_frame(3, 13)])
+    assert client.curve.learned == {13: -50.5}
+    assert (await client.read_outputs([3]))[3].volume_value == 13
 
 
 async def test_unreachable_amp_raises():

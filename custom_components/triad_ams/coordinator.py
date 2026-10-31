@@ -28,10 +28,13 @@ from .const import (
     DEFAULT_POLL_SECONDS,
     DOMAIN,
     EQ_POLL_SECONDS,
+    EQ_RETRY_SECONDS,
     MIN_POLL_SECONDS,
     MODE_CONTROL,
     SNAPSHOT_KEY,
     SNAPSHOT_STORAGE_VERSION,
+    VOLUME_CURVE_KEY,
+    VOLUME_SEEK_STEPS,
 )
 from .protocol import OutputState
 
@@ -40,14 +43,14 @@ _LOGGER = logging.getLogger(__name__)
 type TriadConfigEntry = ConfigEntry["TriadCoordinator"]
 
 
-def _int_keys(mapping: dict[str, str]) -> dict[int, str]:
+def _int_keys(mapping: dict[str, str], maximum: int) -> dict[int, str]:
     result: dict[int, str] = {}
     for key, value in mapping.items():
         try:
             number = int(key)
         except (TypeError, ValueError):
             continue
-        if 1 <= number <= protocol.MAX_OUTPUTS:
+        if 1 <= number <= maximum:
             result[number] = str(value)
     return result
 
@@ -60,8 +63,8 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         poll = max(MIN_POLL_SECONDS, int(options.get(CONF_POLL_SECONDS, DEFAULT_POLL_SECONDS)))
         super().__init__(hass, _LOGGER, name=DOMAIN, config_entry=entry, update_interval=timedelta(seconds=poll))
         self.client = client
-        self.outputs = _int_keys(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS))
-        self.inputs = _int_keys(options.get(CONF_INPUTS, DEFAULT_INPUTS))
+        self.outputs = _int_keys(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS), protocol.MAX_OUTPUTS)
+        self.inputs = _int_keys(options.get(CONF_INPUTS, DEFAULT_INPUTS), protocol.MAX_INPUTS)
         self.default_input = int(options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT))
         self.hub_device_id: str | None = None          # registry id of the amp device (rooms hang off it)
         self.entity_ids: dict[int, str] = {}           # output -> media_player entity id (filled by the entities)
@@ -70,6 +73,33 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self.eq: dict[int, dict[str, float | None]] = {}   # output -> {bass|treble|balance: dB}; read every EQ_POLL_SECONDS
         self._eq_next = 0.0                                 # monotonic time the next tone read is due
         self._store: Store = Store(hass, SNAPSHOT_STORAGE_VERSION, f"{SNAPSHOT_KEY}.{entry.entry_id}")
+        self._curve_store: Store = Store(hass, 1, f"{VOLUME_CURVE_KEY}.{entry.entry_id}")
+        self._curve_pending = False
+
+    # ---------- volume curve (learned from the amp's own SET replies) ----------
+    async def async_load_curve(self) -> None:
+        saved = await self._curve_store.async_load() or {}
+        for value, db in (saved.get("learned") or {}).items():
+            try:
+                self.client.curve.learn(int(value), float(db))
+            except (TypeError, ValueError):
+                continue
+        self.client.curve.dirty = False
+
+    def _curve_data(self) -> dict:
+        return {"learned": {str(v): db for v, db in sorted(self.client.curve.learned.items())}}
+
+    def _save_curve(self) -> None:
+        if self.client.curve.dirty:
+            self.client.curve.dirty = False
+            self._curve_pending = True
+            self._curve_store.async_delay_save(self._curve_data, 10)
+
+    async def async_flush_curve(self) -> None:
+        """Write any learned points now, rather than losing a pending delayed save on unload."""
+        if self.client.curve.dirty or self._curve_pending:
+            self.client.curve.dirty = self._curve_pending = False
+            await self._curve_store.async_save(self._curve_data())
 
     # ---------- mode ----------
     @property
@@ -90,13 +120,33 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
     # ---------- polling ----------
     async def _async_update_data(self) -> dict[int, OutputState]:
         try:
-            states = await self.client.read_outputs(sorted(self.outputs))
+            fresh = await self.client.read_outputs(sorted(self.outputs))
         except TriadError as err:
             raise UpdateFailed(str(err)) from err
-        for out, state in states.items():
-            self._remember(out, state)
+        states = self._merge(fresh, {})
         await self._poll_eq()
         return states
+
+    def _merge(self, fresh: dict[int, OutputState], data: dict[int, OutputState]) -> dict[int, OutputState]:
+        """Fold fresh reads into data. A field the amp did not answer keeps its last known value; an output
+        never fully read stays out of data (its entities show unavailable rather than a made up 'off')."""
+        previous = self.data or {}
+        for out, state in fresh.items():
+            prev = previous.get(out)
+            if prev is not None:
+                if "source" not in state.answered:
+                    state.source = prev.source
+                if "volume" not in state.answered:
+                    state.volume_db, state.volume_value = prev.volume_db, prev.volume_value
+                if "mute" not in state.answered:
+                    state.muted = prev.muted
+                state.answered |= prev.answered
+            if not state.complete:
+                _LOGGER.debug("Out[%d] not fully answered yet (%s), keeping it unavailable", out, sorted(state.answered))
+                continue
+            data[out] = state
+            self._remember(out, state)
+        return data
 
     async def _poll_eq(self, force: bool = False) -> None:
         """Read tone settings when due. Never fails the main poll: on error keep the last known values."""
@@ -107,7 +157,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             fresh = await self.client.read_eq(sorted(self.outputs))
         except TriadError as err:
             _LOGGER.debug("Tone read failed, keeping last values: %s", err)
-            self._eq_next = now + MIN_POLL_SECONDS * 3        # try again soon, not on every poll
+            self._eq_next = now + EQ_RETRY_SECONDS             # try again soon, not on every poll
             return
         for out, kinds in fresh.items():
             merged = dict(self.eq.get(out, {}))
@@ -141,19 +191,20 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             _LOGGER.debug("Post-write refresh failed: %s", err)
             await self.async_request_refresh()
             return
-        data = dict(self.data or {})
-        data.update(fresh)
-        for out, state in fresh.items():
-            self._remember(out, state)
-        self.async_set_updated_data(data)
+        self.async_set_updated_data(self._merge(fresh, dict(self.data or {})))
 
-    # ---------- writes (all go through _send) ----------
-    async def _send(self, frames: list[bytes], outputs: list[int]) -> None:
+    # ---------- writes (all go through _write) ----------
+    async def _write(self, frames: list[bytes]) -> list[str]:
         self._require_control()
         try:
-            await self.client.write(frames)
+            return await self.client.write(frames)
         except TriadError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            self._save_curve()
+
+    async def _send(self, frames: list[bytes], outputs: list[int]) -> None:
+        await self._write(frames)
         await self._refresh_outputs(outputs)
 
     async def async_set_source(self, output: int, input_number: int | None) -> None:
@@ -173,10 +224,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             raise HomeAssistantError(f"Unknown tone control {kind!r}")
         self._require_control()
         value = protocol.snap_eq_db(db)
-        try:
-            await self.client.write([protocol.eq_set_frame(kind, output, value)])
-        except TriadError as err:
-            raise HomeAssistantError(str(err)) from err
+        await self._write([protocol.eq_set_frame(kind, output, value)])
         self.eq.setdefault(output, {})[kind] = value
         self.async_update_listeners()
 
@@ -220,39 +268,92 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         if input_number is not None:
             await self._ensure_unmuted(outputs)
 
+    async def async_party(self, outputs: list[int], input_number: int, volume_value: int | None = None) -> None:
+        """Every listed output to one input, optionally all at one volume, in one session."""
+        if volume_value is None:
+            await self.async_route(outputs, input_number)
+            return
+        frames: list[bytes] = []
+        for out in outputs:
+            frames += [protocol.source_frame(out, input_number), protocol.volume_frame(out, volume_value)]   # volume also clears mute
+        await self._send(frames, outputs)
+        await self._ensure_unmuted(outputs)
+
     # ---------- snapshot / restore (the rollback safety net) ----------
     async def async_snapshot(self) -> dict[str, Any]:
-        """Save the state of every configured output to disk. Read only."""
+        """Save source, volume, mute and tone of every configured output to disk. Read only."""
+        outputs = sorted(self.outputs)
         try:
-            states = await self.client.read_outputs(sorted(self.outputs))
+            states = await self.client.read_outputs(outputs)
+            tones = await self.client.read_eq(outputs)
         except TriadError as err:
             raise HomeAssistantError(str(err)) from err
+        missing = [out for out, state in states.items() if not state.complete]
+        if missing:
+            raise HomeAssistantError(f"Amp did not fully answer for outputs {missing}, snapshot not saved")
         snap = {
             str(out): {
                 "source": state.source,
                 "volume_value": state.volume_value,
+                "volume_db": state.volume_db,
                 "muted": state.muted,
+                **{kind: tones.get(out, {}).get(kind) for kind in protocol.EQ_KINDS},
             }
             for out, state in states.items()
         }
+        self._save_curve()
         await self._store.async_save(snap)
         return snap
 
+    async def _seek_volume(self, out: int, db: float) -> None:
+        """Set the value whose dB is closest to db. Each SET reply reports the exact dB, so a few steps
+        along the curve find the value Control4 had even where the measured curve is only interpolated."""
+        curve = self.client.curve
+        value = curve.to_value(db)
+        best: tuple[float, int] | None = None
+        direction = 0
+        for _ in range(VOLUME_SEEK_STEPS):
+            await self._write([protocol.volume_frame(out, value)])
+            got = curve.learned.get(value)
+            if got is None:
+                return
+            error = got - db
+            if best is None or abs(error) < best[0]:
+                best = (abs(error), value)
+            if abs(error) <= protocol.VOLUME_MATCH_DB:
+                return
+            step = 1 if error < 0 else -1
+            if direction and step != direction:
+                break                                   # crossed the target: best is the closest value
+            direction = step
+            if not 0 <= value + step <= protocol.VOLUME_MAX:
+                break
+            value += step
+        if best is not None and best[1] != value:
+            await self._write([protocol.volume_frame(out, best[1])])
+
     async def async_restore(self) -> int:
-        """Put every saved output back to its saved source, volume and mute. Returns outputs restored."""
+        """Put every saved output back to its saved volume, mute, source and tone. Returns outputs restored."""
         self._require_control()
         snap = await self._store.async_load()
         if not snap:
             raise HomeAssistantError("No snapshot saved yet, run triad_ams.snapshot first.")
+        outputs = sorted(int(key) for key in snap)
+        for out in outputs:                                   # volume first: setting a volume also clears mute
+            saved = snap[str(out)]
+            if saved.get("volume_db") is not None:
+                await self._seek_volume(out, float(saved["volume_db"]))
+            elif saved.get("volume_value") is not None:      # snapshot from v0.2.1 or older
+                await self._write([protocol.volume_frame(out, int(saved["volume_value"]))])
         frames: list[bytes] = []
-        outputs: list[int] = []
-        for key, saved in snap.items():
-            out = int(key)
-            outputs.append(out)
-            if saved.get("volume_value") is not None:
-                frames.append(protocol.volume_frame(out, int(saved["volume_value"])))
+        for out in outputs:
+            saved = snap[str(out)]
             if saved.get("muted"):
                 frames.append(protocol.mute_frame(out, True))
             frames.append(protocol.source_frame(out, saved.get("source")))
+            for kind in protocol.EQ_KINDS:
+                if saved.get(kind) is not None:
+                    frames.append(protocol.eq_set_frame(kind, out, float(saved[kind])))
+                    self.eq.setdefault(out, {})[kind] = protocol.snap_eq_db(float(saved[kind]))
         await self._send(frames, outputs)
         return len(outputs)

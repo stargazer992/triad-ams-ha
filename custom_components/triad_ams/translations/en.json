@@ -49,11 +49,12 @@
     },
     "abort": {
       "not_confirmed": "Nothing changed.",
-      "snapshot_failed": "Could not read the amp to take the safety snapshot, so control mode was not enabled."
+      "snapshot_failed": "Could not read the amp to take the safety snapshot, so control mode was not enabled.",
+      "not_loaded": "The amp is not connected right now, so no safety snapshot can be taken and control mode was not enabled. Try again once the amp is reachable."
     }
   },
   "services": {
-    "snapshot": {"name": "Save snapshot", "description": "Save source, volume and mute of every room (read only)."},
+    "snapshot": {"name": "Save snapshot", "description": "Save source, volume, mute and bass / treble / balance of every room (read only)."},
     "restore_snapshot": {"name": "Restore snapshot", "description": "Put every room back as in the last snapshot."},
     "all_off": {"name": "All off", "description": "Switch every room to Audio Off."},
     "party": {

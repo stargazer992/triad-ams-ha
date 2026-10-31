@@ -10,7 +10,7 @@ import asyncio
 import logging
 
 from . import protocol
-from .protocol import OutputState
+from .protocol import OutputState, VolumeCurve
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,9 +24,10 @@ class TriadError(Exception):
 
 
 class TriadClient:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, curve: VolumeCurve | None = None) -> None:
         self.host = host
         self.port = port
+        self.curve = curve or VolumeCurve()
         self._lock = asyncio.Lock()
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
@@ -53,7 +54,8 @@ class TriadClient:
 
         Not every AMS firmware is known to answer several commands per connection. If the amp goes silent
         (or hangs up) after a frame, that frame is retried once on a fresh connection, so the worst case is
-        one short connection per frame, which is exactly how the amp was verified.
+        one short connection per frame, which is exactly how the amp was verified. If the amp stays silent on
+        the fresh connection too, the session stops with TriadError instead of waiting out every frame.
         """
         async with self._lock:
             reader, writer = await self._open()
@@ -63,12 +65,14 @@ class TriadClient:
                     reply = ""
                     try:
                         reply = await self._exchange(reader, writer, frame)
-                    except TriadError:
+                    except (TriadError, OSError):
                         pass
                     if not reply:
                         self._close(writer)
                         reader, writer = await self._open()
                         reply = await self._exchange(reader, writer, frame)
+                        if not reply:
+                            raise TriadError(f"Amp did not answer {frame.hex(' ')}")
                     replies.append(reply)
                     if write:
                         await asyncio.sleep(WRITE_SETTLE)
@@ -95,9 +99,12 @@ class TriadClient:
                 owners.append(out)
         replies = await self._run(frames)
         states = {out: OutputState() for out in outputs}
-        for out, reply in zip(owners, replies):
-            if reply and not protocol.parse_reply(reply, states[out]):
+        for out, reply in zip(owners, replies, strict=True):
+            if not protocol.parse_reply(reply, states[out], out):
                 _LOGGER.debug("Unparsed reply for Out[%d]: %r", out, reply)
+        for state in states.values():
+            if state.volume_db is not None:
+                state.volume_value = self.curve.to_value(state.volume_db)
         return states
 
     async def read_eq(self, outputs: list[int]) -> dict[int, dict[str, float | None]]:
@@ -113,9 +120,9 @@ class TriadClient:
                 owners.append((out, kind))
         replies = await self._run(frames)
         result: dict[int, dict[str, float | None]] = {out: {} for out in outputs}
-        for (out, kind), reply in zip(owners, replies):
-            value = protocol.parse_eq(kind, reply) if reply else None
-            if reply and value is None:
+        for (out, kind), reply in zip(owners, replies, strict=True):
+            value = protocol.parse_eq(kind, reply, out)
+            if value is None:
                 _LOGGER.debug("Unparsed %s reply for Out[%d]: %r", kind, out, reply)
             result[out][kind] = value
         return result
@@ -123,7 +130,17 @@ class TriadClient:
     async def write(self, frames: list[bytes]) -> list[str]:
         """Send set frames; raises TriadError if the amp answers 'Command error' or nothing."""
         replies = await self._run(frames, write=True)
-        for frame, reply in zip(frames, replies):
+        for frame, reply in zip(frames, replies, strict=True):
+            self._learn_volume(frame, reply)
+        for frame, reply in zip(frames, replies, strict=True):
             if not reply or protocol.is_error(reply):
                 raise TriadError(f"Amp rejected {frame.hex(' ')}: {reply!r}")
         return replies
+
+    def _learn_volume(self, frame: bytes, reply: str) -> None:
+        """A volume SET reply carries the exact dB of the value just written: remember it."""
+        if len(frame) != 7 or frame[4] != protocol.CMD_VOLUME:
+            return
+        parsed = protocol.parse_set_volume(reply)
+        if parsed and parsed[0] == frame[5] + 1:
+            self.curve.learn(frame[6], parsed[1])

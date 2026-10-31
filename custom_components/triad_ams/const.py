@@ -16,6 +16,7 @@ MODE_CONTROL = "control"                  # HA drives the amp
 DEFAULT_MODE = MODE_MONITOR
 
 DEFAULT_PORT = 52000
+EQ_RETRY_SECONDS = 60         # after a failed tone read
 EQ_POLL_SECONDS = 300         # bass / treble / balance rarely change: read them every 5 minutes, not every poll
 DEFAULT_POLL_SECONDS = 10
 MIN_POLL_SECONDS = 3
@@ -39,6 +40,8 @@ DEFAULT_INPUTS = {"5": "WiiM Ultra"}
 
 SNAPSHOT_STORAGE_VERSION = 1
 SNAPSHOT_KEY = f"{DOMAIN}.snapshot"
+VOLUME_CURVE_KEY = f"{DOMAIN}.volume_curve"
+VOLUME_SEEK_STEPS = 8         # restore: at most this many volume SETs per room to land on the saved dB
 
 SERVICE_SNAPSHOT = "snapshot"
 SERVICE_RESTORE = "restore_snapshot"

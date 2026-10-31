@@ -22,7 +22,7 @@ def tx(host, frame):
     s.settimeout(1.5)
     try:
         return s.recv(200).decode("latin-1").strip("\x00").strip()
-    except Exception:
+    except OSError:
         return ""
     finally:
         s.close()
@@ -64,12 +64,33 @@ def db_to_value(db):
     return 0
 
 
+def set_volume(host, out, value):
+    """Write a volume value; the amp's reply names the exact dB it landed on."""
+    m = re.search(r"to (-?\d+(?:\.\d+)?)", tx(host, [0xFF, 0x55, 0x04, 0x03, 0x1E, out - 1, value]))
+    return float(m.group(1)) if m else None
+
+
+def seek_volume(host, out, target_db, steps=8):
+    """The curve between measured points is only an estimate: step until the amp reports the saved dB."""
+    value = db_to_value(target_db)
+    db = set_volume(host, out, value)
+    tried = {value}
+    for _ in range(steps):
+        if db is None or abs(db - target_db) <= 0.05:
+            return
+        value = max(0, min(100, value + (1 if db < target_db else -1)))
+        if value in tried:
+            return
+        tried.add(value)
+        db = set_volume(host, out, value)
+
+
 def restore(host, path):
     data = json.load(open(path))
     for key, saved in data.items():
         out = int(key)
         if saved["volume_db"] is not None:
-            tx(host, [0xFF, 0x55, 0x04, 0x03, 0x1E, out - 1, db_to_value(saved["volume_db"])])
+            seek_volume(host, out, saved["volume_db"])
         if saved["muted"]:
             tx(host, [0xFF, 0x55, 0x03, 0x03, 0x17, out - 1])
         src = 0x18 if saved["source"] is None else saved["source"] - 1

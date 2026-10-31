@@ -5,7 +5,10 @@ import asyncio
 import bisect
 import time
 
-VOLUME_POINTS = [(0, -108.5), (8, -61.0), (16, -47.7), (32, -34.0), (48, -22.5), (64, -13.1), (72, -9.3), (80, -6.0), (88, -3.3), (96, -1.1), (100, 0.0)]
+# The amp's "true" curve: the points the integration knows plus a few it does not, so that (like on the real
+# unit, docs/protocol.md) the integration's interpolation is NOT exact between its measured points.
+VOLUME_POINTS = [(0, -108.5), (8, -61.0), (13, -50.5), (16, -47.7), (24, -40.0), (32, -34.0), (48, -22.5), (64, -13.1),
+                 (72, -9.3), (80, -6.0), (88, -3.3), (96, -1.1), (100, 0.0)]
 
 
 def _db(value: int) -> float:
@@ -31,6 +34,7 @@ class FakeAmp:
         self._source_changed: dict[int, float] = {}
         self.eq = {(c, n): 0x18 for c in (0x2F, 0x30, 0x31) for n in range(24)}   # bass / treble / balance, 0x18 = flat
         self.silent = False                                # True = accept but never answer
+        self.garble: set[tuple[int, int]] = set()          # (cmd, zero based out) GETs answered with "Command error"
         self._server: asyncio.AbstractServer | None = None
         self.port = 0
 
@@ -64,6 +68,8 @@ class FakeAmp:
         if out >= 24:
             return "Command error"
         n = out + 1
+        if is_get and (cmd, out) in self.garble:
+            return "Command error"
         if is_get:
             if cmd == 0x1D:
                 s = self.source[out]

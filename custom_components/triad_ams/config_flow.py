@@ -4,8 +4,12 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 
@@ -105,11 +109,12 @@ class TriadOptionsFlow(OptionsFlow):
         if not user_input["confirm"]:
             return self.async_abort(reason="not_confirmed")
         coordinator = getattr(self.config_entry, "runtime_data", None)
-        if coordinator is not None:
-            try:
-                await coordinator.async_snapshot()
-            except HomeAssistantError:
-                return self.async_abort(reason="snapshot_failed")
+        if coordinator is None:
+            return self.async_abort(reason="not_loaded")             # no coordinator = no safety snapshot
+        try:
+            await coordinator.async_snapshot()
+        except HomeAssistantError:
+            return self.async_abort(reason="snapshot_failed")
         return self.async_create_entry(title="", data={**self.config_entry.options, CONF_MODE: MODE_CONTROL})
 
     async def async_step_monitor(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

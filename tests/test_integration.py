@@ -1,13 +1,21 @@
 """End to end inside Home Assistant against the simulated amp."""
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.triad_ams import protocol
 from custom_components.triad_ams.const import (
-    CONF_DEFAULT_INPUT, CONF_HOST, CONF_INPUTS, CONF_MODE, CONF_OUTPUTS, CONF_POLL_SECONDS, CONF_PORT,
-    DOMAIN, MODE_CONTROL, MODE_MONITOR,
+    CONF_DEFAULT_INPUT,
+    CONF_HOST,
+    CONF_INPUTS,
+    CONF_MODE,
+    CONF_OUTPUTS,
+    CONF_POLL_SECONDS,
+    CONF_PORT,
+    DOMAIN,
+    MODE_CONTROL,
+    MODE_MONITOR,
 )
 
 ROOMS = {"1": "Living Room", "5": "Kitchen", "7": "Family Room"}
@@ -77,9 +85,10 @@ async def test_grouping(hass, amp):
 
 
 async def test_party_all_off_snapshot_restore(hass, amp):
-    entry = await _setup(hass, amp, MODE_CONTROL)
+    await _setup(hass, amp, MODE_CONTROL)
     amp.source[4], amp.volume[4], amp.muted[4] = 1, 40, True       # state "from Control4"
-    await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True, return_response=True)
+    saved = await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True, return_response=True)
+    assert saved == {"outputs_saved": 3}
     await hass.services.async_call(DOMAIN, "party", {"input": 5, "volume": 0.3}, blocking=True)
     assert amp.source[0] == amp.source[4] == amp.source[6] == 4 and amp.volume[6] == 30
     await hass.services.async_call(DOMAIN, "all_off", {}, blocking=True)
@@ -97,6 +106,112 @@ async def test_amp_down_makes_rooms_unavailable(hass, amp):
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(_eid(hass, entry, 5)).state == "unavailable"
+
+
+async def test_party_volume_in_one_session(hass, amp):
+    await _setup(hass, amp, MODE_CONTROL)
+    before = amp.connections
+    await hass.services.async_call(DOMAIN, "party", {"input": 5, "volume": 0.3}, blocking=True)
+    assert [amp.volume[n] for n in (0, 4, 6)] == [30, 30, 30] and amp.source[0] == 4
+    assert amp.connections - before == 2                         # one write session + one re-read, not one per room
+    sets = [f for f in amp.frames if f[4] == protocol.CMD_VOLUME and f[5] != protocol.GET_FLAG]
+    assert sets and all(f[6] == 30 for f in sets)                # never a blip at another volume
+
+
+async def test_silent_amp_makes_rooms_unavailable_not_off(hass, amp, monkeypatch):
+    import custom_components.triad_ams.client as c
+    amp.source[4], amp.volume[4] = 4, 40
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    assert hass.states.get(_eid(hass, entry, 5)).state == "on"
+    amp.silent = True
+    monkeypatch.setattr(c, "REPLY_TIMEOUT", 0.2)
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert not entry.runtime_data.last_update_success
+    assert hass.states.get(_eid(hass, entry, 5)).state == "unavailable"
+
+
+async def test_unanswered_field_keeps_last_value(hass, amp):
+    amp.source[4], amp.volume[4] = 4, 40
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    amp.garble.add((0x1D, 4))                                    # Kitchen's source query now gets "Command error"
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get(_eid(hass, entry, 5))
+    assert state.state == "on" and state.attributes["source"] == "WiiM Ultra"
+
+
+async def test_room_never_answered_is_unavailable(hass, amp):
+    amp.garble.add((0x1D, 6))                                    # Family Room source never answered
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    assert hass.states.get(_eid(hass, entry, 7)).state == "unavailable"
+    assert hass.states.get(_eid(hass, entry, 5)).state == "off"
+
+
+async def test_volume_reads_back_as_written(hass, amp):
+    # 13 sits between two measured points, where the built in curve reads the amp's -50.5 dB as 14.
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    kitchen = _eid(hass, entry, 5)
+    await hass.services.async_call("media_player", "turn_on", {"entity_id": kitchen}, blocking=True)
+    await hass.services.async_call("media_player", "volume_set", {"entity_id": kitchen, "volume_level": 0.13}, blocking=True)
+    assert hass.states.get(kitchen).attributes["volume_level"] == pytest.approx(0.13)
+    amp.volume[4] = 0                                            # Control4 'off': volume to the floor
+    await entry.runtime_data.async_refresh()
+    await hass.services.async_call("media_player", "turn_on", {"entity_id": kitchen}, blocking=True)
+    assert amp.volume[4] == 13                                   # no creep to 14
+    await hass.services.async_call("media_player", "volume_up", {"entity_id": kitchen}, blocking=True)
+    assert amp.volume[4] == 18
+
+
+async def test_learned_curve_survives_restart(hass, amp):
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    await hass.services.async_call("media_player", "volume_set", {"entity_id": _eid(hass, entry, 5), "volume_level": 0.13}, blocking=True)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    amp.volume[0] = 13
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.client.curve.learned.get(13) == -50.5
+    assert entry.runtime_data.data[1].volume_value == 13
+
+
+async def test_restore_lands_on_control4_volume_and_tone(hass, amp):
+    amp.source[4], amp.volume[4] = 4, 13                         # set by Control4: HA never wrote 13
+    amp.eq[(0x2F, 4)] = 0x18 + 6                                 # bass +3 dB
+    await _setup(hass, amp, MODE_CONTROL)
+    await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True, return_response=True)
+    await hass.services.async_call(DOMAIN, "party", {"input": 2, "volume": 0.5}, blocking=True)
+    amp.eq[(0x2F, 4)] = 0x18
+    await hass.services.async_call(DOMAIN, "restore_snapshot", {}, blocking=True, return_response=True)
+    assert (amp.source[4], amp.volume[4]) == (4, 13)
+    assert amp.eq[(0x2F, 4)] == 0x18 + 6
+
+
+async def test_removed_room_loses_its_device(hass, amp):
+    from homeassistant.helpers import device_registry as dr
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    devices = dr.async_get(hass)
+    assert devices.async_get_device_by_identifier((DOMAIN, f"{entry.entry_id}_out7"), entry.entry_id)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_OUTPUTS: {"1": "Living Room", "5": "Kitchen"}})
+    await hass.async_block_till_done()
+    assert devices.async_get_device_by_identifier((DOMAIN, f"{entry.entry_id}_out7"), entry.entry_id) is None
+    assert _eid(hass, entry, 7) is None
+    assert devices.async_get_device_by_identifier((DOMAIN, f"{entry.entry_id}_out5"), entry.entry_id)
+
+
+async def test_take_control_refused_while_amp_unreachable(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "127.0.0.1", CONF_PORT: 1},
+        options={CONF_MODE: MODE_MONITOR, CONF_OUTPUTS: ROOMS, CONF_INPUTS: SOURCES, CONF_DEFAULT_INPUT: 5, CONF_POLL_SECONDS: 10},
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {"next_step_id": "control"})
+    flow = await hass.config_entries.options.async_configure(flow["flow_id"], {"confirm": True})
+    assert flow["type"] == "abort" and flow["reason"] == "not_loaded"
+    assert entry.options[CONF_MODE] == MODE_MONITOR
 
 
 async def test_config_flow_and_rollback_menu(hass, amp):

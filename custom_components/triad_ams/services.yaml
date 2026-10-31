@@ -1,13 +1,24 @@
 # Services of the Triad AMS integration. Writes need CONTROL mode (options); snapshot is read only.
+# config_entry_id picks one amp; without it a service acts on every Triad AMS.
 snapshot:
-  # Save source, volume and mute of every configured room to disk (read only). Taken automatically
+  # Save source, volume, mute and tone of every configured room to disk (read only). Taken automatically
   # when you switch to control mode; run it again before big changes.
+  fields:
+    config_entry_id: &amp
+      selector:
+        config_entry:
+          integration: triad_ams
 restore_snapshot:
   # Put every room back exactly as the last snapshot (rollback of the audio state).
+  fields:
+    config_entry_id: *amp
 all_off:
   # Switch every configured room to Audio Off.
+  fields:
+    config_entry_id: *amp
 party:
   fields:
+    config_entry_id: *amp
     input:
       selector:
         number:

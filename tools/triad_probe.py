@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """READ ONLY. Checks how the amp behaves with the integration's polling pattern. Changes nothing.
 
-Run on any computer on the LAN:   python3 triad_probe.py 192.168.104.98
+Run on any computer on the LAN:   python3 triad_probe.py <amp-ip>
 """
 import socket
 import sys
 import time
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.104.98"
+if len(sys.argv) < 2:
+    sys.exit(__doc__)
+HOST = sys.argv[1]
 PORT = 52000
 
 

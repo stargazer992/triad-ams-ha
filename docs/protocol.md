@@ -48,7 +48,7 @@ Polling check: 30 queries on ONE connection returned clean in 0.31 s; five back-
 
 ## First live write test (Bar, output 10, 2026-10-16 15:55)
 Through Home Assistant on the real amp: volume set, mute, volume up (also unmutes), turn off (Audio Off), turn on (restores source and last volume) all worked, and the amp's own read-back matched each time. The Bar was restored to -52.0 dB, muted, input 5.
-The real curve is steeper than the linear interpolation between measured points: value 13 reads -50.5 dB, where interpolation says about -52.7. Run `tools/triad_volume_scan.py` and paste the full table into `protocol.VOLUME_POINTS`.
+The full 0-100 table was measured on output 24 on 2026-10-31 (`tools/triad_volume_scan.py`) and is `protocol.VOLUME_POINTS`. The 11 points above match it exactly; between them the old linear interpolation was off by up to about 2 dB (value 13 = -50.5 dB, interpolation said -52.7; value 10 = -55.6 dB, the Control4 level seen on the rooms).
 
 ## Quirk found live (Bar, 2026-10-16 16:01): unmute right after a source change is ignored
 Joining a room that was Audio Off + muted routed it but left it muted: the amp acknowledged `Set Out[10] Unmute` but did not apply it when it arrived straight after the source change. An unmute on its own works, and so does setting a volume (which clears mute).

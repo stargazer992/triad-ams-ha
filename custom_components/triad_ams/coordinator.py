@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from datetime import timedelta
 from typing import Any
 
@@ -11,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from . import protocol
 from .client import TriadClient, TriadError
@@ -31,6 +33,7 @@ from .const import (
     EQ_RETRY_SECONDS,
     MIN_POLL_SECONDS,
     MODE_CONTROL,
+    RECENT_ERRORS,
     SNAPSHOT_KEY,
     SNAPSHOT_STORAGE_VERSION,
     VOLUME_CURVE_KEY,
@@ -75,6 +78,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self._store: Store = Store(hass, SNAPSHOT_STORAGE_VERSION, f"{SNAPSHOT_KEY}.{entry.entry_id}")
         self._curve_store: Store = Store(hass, 1, f"{VOLUME_CURVE_KEY}.{entry.entry_id}")
         self._curve_pending = False
+        self.recent_errors: deque[dict[str, str]] = deque(maxlen=RECENT_ERRORS)   # for the diagnostics download
 
     # ---------- volume curve (learned from the amp's own SET replies) ----------
     async def async_load_curve(self) -> None:
@@ -101,6 +105,12 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             self.client.curve.dirty = self._curve_pending = False
             await self._curve_store.async_save(self._curve_data())
 
+    def _note_error(self, where: str, err: Exception) -> None:
+        self.recent_errors.append({"time": dt_util.utcnow().isoformat(), "where": where, "error": str(err)})
+
+    async def async_saved_snapshot(self) -> dict[str, Any] | None:
+        return await self._store.async_load()
+
     # ---------- mode ----------
     @property
     def mode(self) -> str:
@@ -122,6 +132,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         try:
             fresh = await self.client.read_outputs(sorted(self.outputs))
         except TriadError as err:
+            self._note_error("poll", err)
             raise UpdateFailed(str(err)) from err
         states = self._merge(fresh, {})
         await self._poll_eq()
@@ -157,6 +168,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             fresh = await self.client.read_eq(sorted(self.outputs))
         except TriadError as err:
             _LOGGER.debug("Tone read failed, keeping last values: %s", err)
+            self._note_error("tone", err)
             self._eq_next = now + EQ_RETRY_SECONDS             # try again soon, not on every poll
             return
         for out, kinds in fresh.items():

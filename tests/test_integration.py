@@ -1,6 +1,6 @@
 """End to end inside Home Assistant against the simulated amp."""
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -17,6 +17,7 @@ from custom_components.triad_ams.const import (
     MODE_CONTROL,
     MODE_MONITOR,
 )
+from tests.fake_amp import FakeAmp
 
 ROOMS = {"1": "Living Room", "5": "Kitchen", "7": "Family Room"}
 SOURCES = {"5": "WiiM Ultra", "2": "Apple TV"}
@@ -217,7 +218,10 @@ async def test_take_control_refused_while_amp_unreachable(hass):
 async def test_config_flow_and_rollback_menu(hass, amp):
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: amp.port})
+    assert result["type"] == "form" and result["step_id"] == "layout"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"rooms": "1=Den", "sources": "3=Radio", CONF_DEFAULT_INPUT: 3})
     assert result["type"] == "create_entry" and result["options"][CONF_MODE] == MODE_MONITOR     # starts read only
+    assert result["options"][CONF_OUTPUTS] == {"1": "Den"} and result["options"][CONF_INPUTS] == {"3": "Radio"}
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     await hass.async_block_till_done()
     # take control (snapshot first), then roll back
@@ -322,3 +326,78 @@ async def test_tone_read_failure_keeps_media_players(hass, amp):
     assert coordinator.last_update_success                                   # main poll unaffected
     assert hass.states.get(_eid(hass, entry, 5)).state != "unavailable"
     assert hass.states.get(_nid(hass, entry, 5, "bass")).state == "0.0"      # last known tone value kept
+
+
+async def test_setup_layout_is_validated_and_has_no_house_defaults(hass, amp):
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    assert "192.168" not in str(result["data_schema"].schema)          # no built-in amp address
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: amp.port})
+    defaults = {str(k): k.default() for k in result["data_schema"].schema}
+    assert "Kitchen" not in defaults["rooms"] and "WiiM" not in defaults["sources"]
+    bad = await hass.config_entries.flow.async_configure(result["flow_id"], {"rooms": "nope", "sources": "1=A", CONF_DEFAULT_INPUT: 1})
+    assert bad["errors"] == {"rooms": "invalid_map"}
+    bad = await hass.config_entries.flow.async_configure(result["flow_id"], {"rooms": "1=A", "sources": "1=A", CONF_DEFAULT_INPUT: 2})
+    assert bad["errors"] == {CONF_DEFAULT_INPUT: "default_not_in_sources"}
+
+
+async def test_reconfigure_changes_address_and_keeps_options(hass, amp):
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    other = FakeAmp()
+    await other.start()
+    try:
+        flow = await entry.start_reconfigure_flow(hass)
+        flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: 1})
+        assert flow["errors"] == {"base": "cannot_connect"}
+        flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_HOST: "localhost", CONF_PORT: other.port})
+        assert flow["type"] == "abort" and flow["reason"] == "reconfigure_successful"
+        await hass.async_block_till_done()
+        assert entry.data == {CONF_HOST: "localhost", CONF_PORT: other.port} and entry.unique_id == "localhost"
+        assert entry.options[CONF_MODE] == MODE_CONTROL and entry.options[CONF_OUTPUTS] == ROOMS
+        assert other.connections > 0
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await other.stop()
+
+
+async def test_services_target_one_amp(hass, amp):
+    second = FakeAmp()
+    await second.start()
+    try:
+        first = await _setup(hass, amp, MODE_CONTROL)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={CONF_HOST: "localhost", CONF_PORT: second.port},
+            options={CONF_MODE: MODE_CONTROL, CONF_OUTPUTS: ROOMS, CONF_INPUTS: SOURCES, CONF_DEFAULT_INPUT: 5, CONF_POLL_SECONDS: 10},
+            unique_id="localhost",
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await hass.services.async_call(DOMAIN, "party", {"config_entry_id": entry.entry_id, "input": 2}, blocking=True)
+        assert second.source[0] == 1 and amp.source[0] == 0x18            # only the named amp changed
+        saved = await hass.services.async_call(DOMAIN, "snapshot", {"config_entry_id": first.entry_id}, blocking=True, return_response=True)
+        assert saved == {"outputs_saved": len(ROOMS)}
+        saved = await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True, return_response=True)
+        assert saved == {"outputs_saved": 2 * len(ROOMS)}
+        with pytest.raises(ServiceValidationError):
+            await hass.services.async_call(DOMAIN, "all_off", {"config_entry_id": "nope"}, blocking=True)
+        await hass.config_entries.async_unload(entry.entry_id)
+    finally:
+        await second.stop()
+
+
+async def test_diagnostics(hass, amp):
+    from custom_components.triad_ams.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+    amp.source[4], amp.volume[4] = 4, 13
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True)
+    amp.silent = True
+    await entry.runtime_data.async_refresh()
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag["entry"]["data"][CONF_HOST] == "**REDACTED**" and diag["mode"] == MODE_CONTROL
+    assert diag["last_update_success"] is False and diag["recent_errors"][-1]["where"] == "poll"
+    assert diag["outputs"]["5"]["name"] == "Kitchen" and diag["outputs"]["5"]["volume_value"] == 13
+    assert diag["snapshot"]["5"]["source"] == 5
+    amp.silent = False

@@ -18,6 +18,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .client import TriadClient
 from .const import (
+    ATTR_CONFIG_ENTRY_ID,
     CONF_HOST,
     CONF_PORT,
     DEFAULT_PORT,
@@ -95,48 +96,56 @@ async def async_unload_entry(hass: HomeAssistant, entry: TriadConfigEntry) -> bo
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-def _coordinators(hass: HomeAssistant) -> list[TriadCoordinator]:
-    coordinators = [e.runtime_data for e in hass.config_entries.async_loaded_entries(DOMAIN)]
-    if not coordinators:
+def _coordinators(hass: HomeAssistant, call: ServiceCall) -> list[TriadCoordinator]:
+    """The amp named by config_entry_id, or every loaded amp when the call names none."""
+    loaded = hass.config_entries.async_loaded_entries(DOMAIN)
+    wanted = call.data.get(ATTR_CONFIG_ENTRY_ID)
+    if wanted:
+        loaded = [e for e in loaded if e.entry_id == wanted]
+        if not loaded:
+            raise ServiceValidationError(f"No loaded Triad AMS with config entry id {wanted}")
+    if not loaded:
         raise ServiceValidationError("No Triad AMS is loaded")
-    return coordinators
+    return [e.runtime_data for e in loaded]
 
 
 def _register_services(hass: HomeAssistant) -> None:
     async def snapshot(call: ServiceCall) -> dict:
         saved = 0
-        for coordinator in _coordinators(hass):
+        for coordinator in _coordinators(hass, call):
             saved += len(await coordinator.async_snapshot())
         return {"outputs_saved": saved}
 
     async def restore(call: ServiceCall) -> dict:
         restored = 0
-        for coordinator in _coordinators(hass):
+        for coordinator in _coordinators(hass, call):
             restored += await coordinator.async_restore()
         return {"outputs_restored": restored}
 
     async def all_off(call: ServiceCall) -> None:
-        for coordinator in _coordinators(hass):
+        for coordinator in _coordinators(hass, call):
             await coordinator.async_route(sorted(coordinator.outputs), None)
 
     async def party(call: ServiceCall) -> None:
         input_number = call.data.get("input")
         volume = call.data.get("volume")
-        for coordinator in _coordinators(hass):
+        for coordinator in _coordinators(hass, call):
             source = input_number or coordinator.default_input
             if source not in coordinator.inputs and input_number:
                 raise ServiceValidationError(f"Input {input_number} is not in the configured source list")
             await coordinator.async_party(sorted(coordinator.outputs), source, None if volume is None else round(volume * 100))
 
-    hass.services.async_register(DOMAIN, SERVICE_SNAPSHOT, snapshot, supports_response=SupportsResponse.OPTIONAL)
-    hass.services.async_register(DOMAIN, SERVICE_RESTORE, restore, supports_response=SupportsResponse.OPTIONAL)
-    hass.services.async_register(DOMAIN, SERVICE_ALL_OFF, all_off)
+    target = {vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string}
+    hass.services.async_register(DOMAIN, SERVICE_SNAPSHOT, snapshot, schema=vol.Schema(target), supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, SERVICE_RESTORE, restore, schema=vol.Schema(target), supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, SERVICE_ALL_OFF, all_off, schema=vol.Schema(target))
     hass.services.async_register(
         DOMAIN,
         SERVICE_PARTY,
         party,
         schema=vol.Schema(
             {
+                **target,
                 vol.Optional("input"): vol.All(vol.Coerce(int), vol.Range(min=1, max=24)),
                 vol.Optional("volume"): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
             }

@@ -1,6 +1,7 @@
 """Config flow (add the amp) and options flow (mode, rooms, sources, polling)."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -12,6 +13,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
 from .client import TriadClient, TriadError
 from .const import (
@@ -33,6 +35,26 @@ from .const import (
     MODE_CONTROL,
     MODE_MONITOR,
 )
+
+TEXT_AREA = TextSelector(TextSelectorConfig(multiline=True))
+
+
+def _address_schema(values: Mapping[str, Any]) -> vol.Schema:
+    host = values.get(CONF_HOST)
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOST, **({"default": host} if host else {})): str,
+            vol.Required(CONF_PORT, default=values.get(CONF_PORT, DEFAULT_PORT)): int,
+        }
+    )
+
+
+async def _can_connect(host: str, port: int) -> bool:
+    try:
+        await TriadClient(host, port).read_outputs([1])
+    except TriadError:
+        return False
+    return True
 
 
 def format_map(mapping: dict[str, str]) -> str:
@@ -59,34 +81,75 @@ class TriadConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Step 1: where the amp is (read only check that it answers)."""
         errors: dict[str, str] = {}
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             port = user_input[CONF_PORT]
-            try:
-                await TriadClient(host, port).read_outputs([1])
-            except TriadError:
-                errors["base"] = "cannot_connect"
-            else:
+            if await _can_connect(host, port):
                 await self.async_set_unique_id(host)
                 self._abort_if_unique_id_configured()
+                self._data = {CONF_HOST: host, CONF_PORT: port}
+                return await self.async_step_layout()
+            errors["base"] = "cannot_connect"
+        return self.async_show_form(step_id="user", data_schema=_address_schema(user_input or {}), errors=errors)
+
+    async def async_step_layout(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Step 2: this house's rooms (outputs) and sources (inputs). Editable later in the options."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            rooms, sources = parse_map(user_input["rooms"]), parse_map(user_input["sources"])
+            default_input = user_input[CONF_DEFAULT_INPUT]
+            if rooms is None:
+                errors["rooms"] = "invalid_map"
+            elif sources is None:
+                errors["sources"] = "invalid_map"
+            elif str(default_input) not in sources:
+                errors[CONF_DEFAULT_INPUT] = "default_not_in_sources"
+            else:
                 return self.async_create_entry(
-                    title=f"Triad AMS ({host})",
-                    data={CONF_HOST: host, CONF_PORT: port},
+                    title=f"Triad AMS ({self._data[CONF_HOST]})",
+                    data=self._data,
                     options={
                         CONF_MODE: DEFAULT_MODE,
-                        CONF_OUTPUTS: DEFAULT_OUTPUTS,
-                        CONF_INPUTS: DEFAULT_INPUTS,
-                        CONF_DEFAULT_INPUT: DEFAULT_INPUT,
+                        CONF_OUTPUTS: rooms,
+                        CONF_INPUTS: sources,
+                        CONF_DEFAULT_INPUT: default_input,
                         CONF_POLL_SECONDS: DEFAULT_POLL_SECONDS,
                     },
                 )
+        user_input = user_input or {}
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_HOST, default="192.168.104.98"): str, vol.Required(CONF_PORT, default=DEFAULT_PORT): int}),
+            step_id="layout",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("rooms", default=user_input.get("rooms", format_map(DEFAULT_OUTPUTS))): TEXT_AREA,
+                    vol.Required("sources", default=user_input.get("sources", format_map(DEFAULT_INPUTS))): TEXT_AREA,
+                    vol.Required(CONF_DEFAULT_INPUT, default=user_input.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT)): vol.All(int, vol.Range(min=1, max=24)),
+                }
+            ),
             errors=errors,
         )
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Change the amp's address or port (e.g. it got a new IP) without losing rooms, snapshot or mode."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            port = user_input[CONF_PORT]
+            if host != entry.data[CONF_HOST] and any(e.unique_id == host for e in self._async_current_entries(include_ignore=False)):
+                return self.async_abort(reason="already_configured")
+            if await _can_connect(host, port):
+                return self.async_update_reload_and_abort(
+                    entry, unique_id=host, title=f"Triad AMS ({host})", data_updates={CONF_HOST: host, CONF_PORT: port}
+                )
+            errors["base"] = "cannot_connect"
+        return self.async_show_form(step_id="reconfigure", data_schema=_address_schema(user_input or entry.data), errors=errors)
 
     @staticmethod
     @callback
@@ -132,7 +195,7 @@ class TriadOptionsFlow(OptionsFlow):
                 return self.async_create_entry(title="", data={**options, CONF_OUTPUTS: parsed})
         return self.async_show_form(
             step_id="rooms",
-            data_schema=vol.Schema({vol.Required("rooms", default=format_map(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS))): str}),
+            data_schema=vol.Schema({vol.Required("rooms", default=format_map(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS))): TEXT_AREA}),
             errors=errors,
         )
 
@@ -152,7 +215,7 @@ class TriadOptionsFlow(OptionsFlow):
             step_id="sources",
             data_schema=vol.Schema(
                 {
-                    vol.Required("sources", default=format_map(options.get(CONF_INPUTS, DEFAULT_INPUTS))): str,
+                    vol.Required("sources", default=format_map(options.get(CONF_INPUTS, DEFAULT_INPUTS))): TEXT_AREA,
                     vol.Required(CONF_DEFAULT_INPUT, default=options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT)): vol.All(int, vol.Range(min=1, max=24)),
                 }
             ),

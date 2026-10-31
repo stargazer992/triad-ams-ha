@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone snapshot / restore of the amp state. Needs no Home Assistant, only Python 3.
+"""Standalone snapshot / restore of the amp state (source, volume, mute, bass, treble, balance). Needs no Home Assistant, only Python 3.
 
-    python3 triad_rollback.py snapshot 192.168.104.98 amp_snapshot.json      (read only)
-    python3 triad_rollback.py restore  192.168.104.98 amp_snapshot.json      (writes the amp)
+    python3 triad_rollback.py snapshot <amp-ip> amp_snapshot.json      (read only)
+    python3 triad_rollback.py restore  <amp-ip> amp_snapshot.json      (writes the amp)
 
 Use it before the first switch to control mode, and any time Home Assistant is down and the
 amp must be put back as Control4 left it.
@@ -32,6 +32,32 @@ def get(host, cmd, out):
     return tx(host, [0xFF, 0x55, 0x04, 0x03, cmd, 0xF5, out - 1])
 
 
+TONE = {"bass": 0x2F, "treble": 0x30, "balance": 0x31}     # value = 0x18 + 2*dB (balance: + right, - left)
+
+
+def parse_tone(kind, reply):
+    """'Get Out[2] Bass : -3' -> -3.0; balance 'Bal Center' -> 0, 'Bal R 1' -> 1, 'Bal L 4' -> -4. None if not understood."""
+    if not re.search(rf"Out\[\d+\]\s+{kind}", reply, re.IGNORECASE):
+        return None
+    if kind == "balance":
+        b = re.search(r"Bal(?:ance)?\s*(Center|Centre|[LR])?\s*(-?\d+(?:\.\d+)?)?", reply.split(":", 1)[-1], re.IGNORECASE)
+        if not b:
+            return None
+        side, num = b.group(1), b.group(2)
+        if side and side.lower().startswith("c"):
+            return 0.0
+        if num is None:
+            return None
+        return -abs(float(num)) if side and side.upper() == "L" else abs(float(num)) if side else float(num)
+    n = re.search(r":\s*(-?\d+(?:\.\d+)?)", reply)
+    return float(n.group(1)) if n else None
+
+
+def set_tone(host, out, kind, db):
+    value = max(0, min(0x30, round(0x18 + 2 * max(-12.0, min(12.0, db)))))
+    tx(host, [0xFF, 0x55, 0x04, 0x03, TONE[kind], out - 1, value])
+
+
 def snapshot(host, path):
     data = {}
     for out in OUTPUTS:
@@ -44,6 +70,7 @@ def snapshot(host, path):
             "source": int(m.group(1)) if m else None,
             "volume_db": float(v.group(1)) if v else None,
             "muted": "mute" in mute.lower() and "unmute" not in mute.lower(),
+            **{kind: parse_tone(kind, get(host, cmd, out)) for kind, cmd in TONE.items()},
         }
     json.dump(data, open(path, "w"), indent=2)
     print(f"saved {len(data)} outputs to {path}")
@@ -95,6 +122,9 @@ def restore(host, path):
             tx(host, [0xFF, 0x55, 0x03, 0x03, 0x17, out - 1])
         src = 0x18 if saved["source"] is None else saved["source"] - 1
         tx(host, [0xFF, 0x55, 0x04, 0x03, 0x1D, out - 1, src])
+        for kind in TONE:                                    # files from older versions have no tone: left as is
+            if saved.get(kind) is not None:
+                set_tone(host, out, kind, saved[kind])
         print("restored output", out)
 
 

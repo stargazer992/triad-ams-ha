@@ -16,6 +16,8 @@ def test_frames_match_verified_bytes():
 
 
 def test_volume_curve_matches_measurements():
+    assert [v for v, _ in protocol.VOLUME_POINTS] == list(range(101))     # the full table measured on the unit
+    assert protocol.db_to_value(-50.5) == 13 and protocol.db_to_value(-55.6) == 10
     for value, db in protocol.VOLUME_POINTS:
         assert protocol.value_to_db(value) == pytest.approx(db)
         assert protocol.db_to_value(db) == value
@@ -102,11 +104,11 @@ def test_replies_must_name_the_asked_output():
 
 
 def test_volume_curve_learns_exact_points():
-    curve = protocol.VolumeCurve()
-    assert curve.to_value(-50.5) == 14                # interpolation between measured points is off by one here
-    curve.learn(13, -50.5)                            # what the amp said in 'Set Out[n] Output Volume to -50.5'
-    assert curve.to_value(-50.5) == 13 and curve.dirty
-    assert curve.to_db(13) == -50.5
+    curve = protocol.VolumeCurve()                    # a unit whose curve differs from the measured table
+    assert curve.to_value(-51.6) == 12
+    curve.learn(13, -51.6)                            # what the amp said in 'Set Out[n] Output Volume to -51.6'
+    assert curve.to_value(-51.6) == 13 and curve.dirty
+    assert curve.to_db(13) == -51.6
     assert protocol.parse_set_volume("Set Out[10] Output Volume to -50.5") == (10, -50.5)
 
 
@@ -164,3 +166,37 @@ async def test_eq_read_write_roundtrip(amp):
     res = await client.read_eq([10, 1])
     assert res[10] == {"bass": 3.0, "treble": -2.0, "balance": -4.0}
     assert res[1] == {"bass": 0.0, "treble": 0.0, "balance": 0.0}                           # other outputs untouched
+
+
+def _rollback_tool(port):
+    import importlib.util
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parents[1] / "tools" / "triad_rollback.py"
+    spec = importlib.util.spec_from_file_location("triad_rollback", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    tool.PORT, tool.OUTPUTS = port, range(1, 4)
+    return tool
+
+
+def test_rollback_tool_parses_tone():
+    tool = _rollback_tool(0)
+    assert tool.parse_tone("bass", "Get Out[2] Bass : -3") == -3.0
+    assert tool.parse_tone("balance", "Get Out[2] Balance : Bal Center") == 0.0
+    assert tool.parse_tone("balance", "Get Out[2] Balance : Bal L 4") == -4.0
+    assert tool.parse_tone("balance", "Get Out[2] Balance : Bal R 1.5") == 1.5
+    assert tool.parse_tone("bass", "Command error") is None
+
+
+async def test_rollback_tool_restores_tone(amp, tmp_path):
+    import asyncio
+    tool = _rollback_tool(amp.port)
+    amp.eq[(0x2F, 1)], amp.eq[(0x31, 1)] = 0x18 - 4, 0x18 + 3      # out 2: bass -2 dB, balance R 1.5
+    amp.source[1], amp.volume[1] = 4, 13
+    path = str(tmp_path / "snap.json")
+    await asyncio.to_thread(tool.snapshot, "127.0.0.1", path)
+    amp.eq[(0x2F, 1)] = amp.eq[(0x31, 1)] = 0x18
+    amp.source[1], amp.volume[1] = 0x18, 50
+    await asyncio.to_thread(tool.restore, "127.0.0.1", path)
+    assert amp.eq[(0x2F, 1)] == 0x18 - 4 and amp.eq[(0x31, 1)] == 0x18 + 3
+    assert amp.source[1] == 4 and amp.volume[1] == 13

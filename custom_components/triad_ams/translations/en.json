@@ -4,11 +4,38 @@
       "user": {
         "title": "Triad AMS audio matrix",
         "description": "Adding the amp only reads it. Nothing is written until you switch to control mode in the options.",
-        "data": {"host": "Amp IP address", "port": "Port"}
+        "data": {
+          "host": "Amp IP address or host name",
+          "port": "Port"
+        }
+      },
+      "layout": {
+        "title": "Rooms and sources",
+        "description": "One per line as number=Name, numbers 1-24. Rooms are amp outputs (5=Kitchen), sources are amp inputs (5=Streamer). You can change both later in the options.",
+        "data": {
+          "rooms": "Rooms (outputs)",
+          "sources": "Sources (inputs)",
+          "default_input": "Default input when a room is switched on"
+        }
+      },
+      "reconfigure": {
+        "title": "Amp address",
+        "description": "Change where Home Assistant finds the amp. Rooms, sources, mode and the snapshot are kept.",
+        "data": {
+          "host": "Amp IP address or host name",
+          "port": "Port"
+        }
       }
     },
-    "error": {"cannot_connect": "Cannot reach the amp on that address and port."},
-    "abort": {"already_configured": "This amp is already set up."}
+    "error": {
+      "cannot_connect": "Cannot reach the amp on that address and port.",
+      "invalid_map": "Use one 'number=Name' per line with numbers 1-24.",
+      "default_not_in_sources": "The default input must be one of the listed sources."
+    },
+    "abort": {
+      "already_configured": "This amp is already set up.",
+      "reconfigure_successful": "Amp address updated."
+    }
   },
   "options": {
     "step": {
@@ -26,21 +53,30 @@
       "control": {
         "title": "Take control of the amp",
         "description": "A snapshot of every room's source, volume and mute is saved first. Keep Control4 audio idle while HA controls the amp: two controllers writing at once will fight.",
-        "data": {"confirm": "Yes, take control"}
+        "data": {
+          "confirm": "Yes, take control"
+        }
       },
       "rooms": {
         "title": "Rooms",
         "description": "One room per line as output=Name, outputs 1-24. Example: 5=Kitchen",
-        "data": {"rooms": "Rooms"}
+        "data": {
+          "rooms": "Rooms"
+        }
       },
       "sources": {
         "title": "Sources",
-        "description": "One source per line as input=Name, inputs 1-24. Example: 5=WiiM Ultra",
-        "data": {"sources": "Sources", "default_input": "Default input when a room is switched on"}
+        "description": "One source per line as input=Name, inputs 1-24. Example: 5=Streamer",
+        "data": {
+          "sources": "Sources",
+          "default_input": "Default input when a room is switched on"
+        }
       },
       "settings": {
         "title": "Settings",
-        "data": {"poll_seconds": "Refresh interval (seconds)"}
+        "data": {
+          "poll_seconds": "Refresh interval (seconds)"
+        }
       }
     },
     "error": {
@@ -54,13 +90,53 @@
     }
   },
   "services": {
-    "snapshot": {"name": "Save snapshot", "description": "Save source, volume, mute and bass / treble / balance of every room (read only)."},
-    "restore_snapshot": {"name": "Restore snapshot", "description": "Put every room back as in the last snapshot."},
-    "all_off": {"name": "All off", "description": "Switch every room to Audio Off."},
+    "snapshot": {
+      "name": "Save snapshot",
+      "description": "Save source, volume, mute and bass / treble / balance of every room (read only).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Amp",
+          "description": "Which Triad AMS (every one if empty)."
+        }
+      }
+    },
+    "restore_snapshot": {
+      "name": "Restore snapshot",
+      "description": "Put every room back as in the last snapshot.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Amp",
+          "description": "Which Triad AMS (every one if empty)."
+        }
+      }
+    },
+    "all_off": {
+      "name": "All off",
+      "description": "Switch every room to Audio Off.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Amp",
+          "description": "Which Triad AMS (every one if empty)."
+        }
+      }
+    },
     "party": {
       "name": "Party",
       "description": "Send every room to one input.",
-      "fields": {"input": {"name": "Input", "description": "Amp input 1-24 (default input if empty)."}, "volume": {"name": "Volume", "description": "Optional volume 0-1 for every room."}}
+      "fields": {
+        "config_entry_id": {
+          "name": "Amp",
+          "description": "Which Triad AMS (every one if empty)."
+        },
+        "input": {
+          "name": "Input",
+          "description": "Amp input 1-24 (default input if empty)."
+        },
+        "volume": {
+          "name": "Volume",
+          "description": "Optional volume 0-1 for every room."
+        }
+      }
     }
   }
 }

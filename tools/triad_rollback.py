@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone snapshot / restore of the amp state (source, volume, mute, bass, treble, balance). Needs no Home Assistant, only Python 3.
+"""Standalone snapshot / restore of the amp state (source, volume, mute, bass, treble, balance, loudness). Needs no Home Assistant, only Python 3.
 
     python3 triad_rollback.py snapshot <amp-ip> amp_snapshot.json      (read only)
     python3 triad_rollback.py restore  <amp-ip> amp_snapshot.json      (writes the amp)
@@ -58,6 +58,12 @@ def set_tone(host, out, kind, db):
     tx(host, [0xFF, 0x55, 0x04, 0x03, TONE[kind], out - 1, value])
 
 
+def parse_loudness(reply):
+    """'Get Out[2] Loudness status : On' -> True, '... : Off' -> False, None if not understood."""
+    m = re.search(r"Loudness(?:\s+status)?\s*:?\s*(On|Off)\b", reply, re.IGNORECASE)
+    return m.group(1).lower() == "on" if m else None
+
+
 def snapshot(host, path):
     data = {}
     for out in OUTPUTS:
@@ -71,6 +77,7 @@ def snapshot(host, path):
             "volume_db": float(v.group(1)) if v else None,
             "muted": "mute" in mute.lower() and "unmute" not in mute.lower(),
             **{kind: parse_tone(kind, get(host, cmd, out)) for kind, cmd in TONE.items()},
+            "loudness": parse_loudness(get(host, 0x1A, out)),
         }
     json.dump(data, open(path, "w"), indent=2)
     print(f"saved {len(data)} outputs to {path}")
@@ -125,6 +132,8 @@ def restore(host, path):
         for kind in TONE:                                    # files from older versions have no tone: left as is
             if saved.get(kind) is not None:
                 set_tone(host, out, kind, saved[kind])
+        if saved.get("loudness") is not None:
+            tx(host, [0xFF, 0x55, 0x04, 0x03, 0x1A if saved["loudness"] else 0x1B, out - 1, 1 if saved["loudness"] else 0])
         print("restored output", out)
 
 

@@ -1,6 +1,7 @@
 """Polling coordinator + the single place that writes to the amp."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -22,6 +23,7 @@ from .const import (
     CONF_MODE,
     CONF_OUTPUTS,
     CONF_POLL_SECONDS,
+    CONF_SOURCE_PLAYERS,
     DEFAULT_INPUT,
     DEFAULT_INPUTS,
     DEFAULT_MODE,
@@ -69,16 +71,20 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self.outputs = _int_keys(options.get(CONF_OUTPUTS, DEFAULT_OUTPUTS), protocol.MAX_OUTPUTS)
         self.inputs = _int_keys(options.get(CONF_INPUTS, DEFAULT_INPUTS), protocol.MAX_INPUTS)
         self.default_input = int(options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT))
+        self.source_players: dict[int, str] = _int_keys(options.get(CONF_SOURCE_PLAYERS, {}), protocol.MAX_INPUTS)
         self.hub_device_id: str | None = None          # registry id of the amp device (rooms hang off it)
         self.entity_ids: dict[int, str] = {}           # output -> media_player entity id (filled by the entities)
         self.last_volume: dict[int, int] = {}          # output -> last volume above the floor, used by turn_on
         self.last_source: dict[int, int] = {}          # output -> last real source, used by turn_on
         self.eq: dict[int, dict[str, float | None]] = {}   # output -> {bass|treble|balance: dB}; read every EQ_POLL_SECONDS
+        self.loudness: dict[int, bool | None] = {}       # output -> loudness on/off; read with the tone controls
         self._eq_next = 0.0                                 # monotonic time the next tone read is due
         self._store: Store = Store(hass, SNAPSHOT_STORAGE_VERSION, f"{SNAPSHOT_KEY}.{entry.entry_id}")
         self._curve_store: Store = Store(hass, 1, f"{VOLUME_CURVE_KEY}.{entry.entry_id}")
         self._curve_pending = False
         self.recent_errors: deque[dict[str, str]] = deque(maxlen=RECENT_ERRORS)   # for the diagnostics download
+        self._pending_volume: dict[int, int] = {}          # output -> newest requested volume not yet sent
+        self._volume_locks: dict[int, asyncio.Lock] = {}
 
     # ---------- volume curve (learned from the amp's own SET replies) ----------
     async def async_load_curve(self) -> None:
@@ -122,10 +128,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
 
     def _require_control(self) -> None:
         if not self.can_write:
-            raise HomeAssistantError(
-                "Triad AMS is in monitor mode (read only), Control4 owns the amp. "
-                "Switch to control mode in the integration options first."
-            )
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="monitor_mode")
 
     # ---------- polling ----------
     async def _async_update_data(self) -> dict[int, OutputState]:
@@ -166,6 +169,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
             return
         try:
             fresh = await self.client.read_eq(sorted(self.outputs))
+            loud = await self.client.read_loudness(sorted(self.outputs))
         except TriadError as err:
             _LOGGER.debug("Tone read failed, keeping last values: %s", err)
             self._note_error("tone", err)
@@ -179,6 +183,9 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
                 else:
                     merged.setdefault(kind, None)
             self.eq[out] = merged
+        for out, value in loud.items():
+            if value is not None or out not in self.loudness:
+                self.loudness[out] = value
         self._eq_next = now + EQ_POLL_SECONDS
 
     def _remember(self, out: int, state: OutputState) -> None:
@@ -211,7 +218,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         try:
             return await self.client.write(frames)
         except TriadError as err:
-            raise HomeAssistantError(str(err)) from err
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="amp_error", translation_placeholders={"error": str(err)}) from err
         finally:
             self._save_curve()
 
@@ -223,8 +230,18 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         await self._send([protocol.source_frame(output, input_number)], [output])
 
     async def async_set_volume_value(self, output: int, value: int) -> None:
-        """value 0..100. The amp also clears mute when the volume is set."""
-        await self._send([protocol.volume_frame(output, value)], [output])
+        """value 0..100. The amp also clears mute when the volume is set.
+
+        Latest wins: while one volume write to a room is on the wire, newer requests (a dragged slider) only
+        replace the pending value, so a drag costs at most two writes instead of one per slider position."""
+        self._require_control()
+        self._pending_volume[output] = value
+        lock = self._volume_locks.setdefault(output, asyncio.Lock())
+        async with lock:
+            latest = self._pending_volume.pop(output, None)
+            if latest is None:
+                return                                  # a newer request already sent the room's final value
+            await self._send([protocol.volume_frame(output, latest)], [output])
 
     async def async_set_mute(self, output: int, mute: bool) -> None:
         await self._send([protocol.mute_frame(output, mute)], [output])
@@ -233,11 +250,17 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         """Set bass / treble / balance (dB). The amp's read-back lags a set, so the new value is shown right away
         and confirmed by the next scheduled tone read."""
         if kind not in protocol.EQ_KINDS:
-            raise HomeAssistantError(f"Unknown tone control {kind!r}")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="unknown_tone", translation_placeholders={"kind": kind})
         self._require_control()
         value = protocol.snap_eq_db(db)
         await self._write([protocol.eq_set_frame(kind, output, value)])
         self.eq.setdefault(output, {})[kind] = value
+        self.async_update_listeners()
+
+    async def async_set_loudness(self, output: int, on: bool) -> None:
+        self._require_control()
+        await self._write([protocol.loudness_frame(output, on)])
+        self.loudness[output] = on
         self.async_update_listeners()
 
     def _on_frames(self, out: int, input_number: int) -> list[bytes]:
@@ -293,16 +316,17 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
 
     # ---------- snapshot / restore (the rollback safety net) ----------
     async def async_snapshot(self) -> dict[str, Any]:
-        """Save source, volume, mute and tone of every configured output to disk. Read only."""
+        """Save source, volume, mute, tone and loudness of every configured output to disk. Read only."""
         outputs = sorted(self.outputs)
         try:
             states = await self.client.read_outputs(outputs)
             tones = await self.client.read_eq(outputs)
+            loud = await self.client.read_loudness(outputs)
         except TriadError as err:
-            raise HomeAssistantError(str(err)) from err
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="amp_error", translation_placeholders={"error": str(err)}) from err
         missing = [out for out, state in states.items() if not state.complete]
         if missing:
-            raise HomeAssistantError(f"Amp did not fully answer for outputs {missing}, snapshot not saved")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="snapshot_incomplete", translation_placeholders={"outputs": str(missing)})
         snap = {
             str(out): {
                 "source": state.source,
@@ -310,6 +334,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
                 "volume_db": state.volume_db,
                 "muted": state.muted,
                 **{kind: tones.get(out, {}).get(kind) for kind in protocol.EQ_KINDS},
+                "loudness": loud.get(out),
             }
             for out, state in states.items()
         }
@@ -349,7 +374,7 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
         self._require_control()
         snap = await self._store.async_load()
         if not snap:
-            raise HomeAssistantError("No snapshot saved yet, run triad_ams.snapshot first.")
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="no_snapshot")
         outputs = sorted(int(key) for key in snap)
         for out in outputs:                                   # volume first: setting a volume also clears mute
             saved = snap[str(out)]
@@ -367,5 +392,8 @@ class TriadCoordinator(DataUpdateCoordinator[dict[int, OutputState]]):
                 if saved.get(kind) is not None:
                     frames.append(protocol.eq_set_frame(kind, out, float(saved[kind])))
                     self.eq.setdefault(out, {})[kind] = protocol.snap_eq_db(float(saved[kind]))
+            if saved.get("loudness") is not None:
+                frames.append(protocol.loudness_frame(out, bool(saved["loudness"])))
+                self.loudness[out] = bool(saved["loudness"])
         await self._send(frames, outputs)
         return len(outputs)

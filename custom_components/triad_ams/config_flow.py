@@ -11,7 +11,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.core import callback
+from homeassistant.core import callback, valid_entity_id
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
@@ -24,6 +24,7 @@ from .const import (
     CONF_OUTPUTS,
     CONF_POLL_SECONDS,
     CONF_PORT,
+    CONF_SOURCE_PLAYERS,
     DEFAULT_INPUT,
     DEFAULT_INPUTS,
     DEFAULT_MODE,
@@ -161,7 +162,7 @@ class TriadOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["control", "monitor", "rooms", "sources", "settings"],
+            menu_options=["control", "monitor", "rooms", "sources", "players", "settings"],
             description_placeholders={"mode": self.config_entry.options.get(CONF_MODE, DEFAULT_MODE)},
         )
 
@@ -219,6 +220,23 @@ class TriadOptionsFlow(OptionsFlow):
                     vol.Required(CONF_DEFAULT_INPUT, default=options.get(CONF_DEFAULT_INPUT, DEFAULT_INPUT)): vol.All(int, vol.Range(min=1, max=24)),
                 }
             ),
+            errors=errors,
+        )
+
+    async def async_step_players(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Which Home Assistant player feeds each amp input, so rooms on that input show its now playing."""
+        errors: dict[str, str] = {}
+        options = self.config_entry.options
+        if user_input is not None:
+            text = user_input.get("players", "")
+            parsed = parse_map(text) if text.strip() else {}
+            if parsed is None or not all(v.startswith("media_player.") and valid_entity_id(v) for v in parsed.values()):
+                errors["players"] = "invalid_players"
+            else:
+                return self.async_create_entry(title="", data={**options, CONF_SOURCE_PLAYERS: parsed})
+        return self.async_show_form(
+            step_id="players",
+            data_schema=vol.Schema({vol.Optional("players", default=format_map(options.get(CONF_SOURCE_PLAYERS, {}))): TEXT_AREA}),
             errors=errors,
         )
 

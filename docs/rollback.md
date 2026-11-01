@@ -10,7 +10,7 @@ The goal is to run the house without Control4. Until then both can coexist, beca
 ## Rollback (any time)
 - Options > "Roll back to monitor only": HA stops writing at once, nothing else changes.
 - Want the amp exactly as it was before takeover: run service `triad_ams.restore_snapshot` first (needs control mode), then switch to monitor.
-- HA is down: `python3 tools/triad_rollback.py restore 192.168.104.98 amp_snapshot.json` (take the file with `snapshot` beforehand, it is read only). It puts back source, volume (stepping until the amp reports the saved dB), mute, bass, treble and balance. Files from before tone support restore everything but tone.
+- HA is down: `python3 tools/triad_rollback.py restore 192.168.104.98 amp_snapshot.json` (take the file with `snapshot` beforehand, it is read only). It puts back source, volume (stepping until the amp reports the saved dB), mute, bass, treble, balance and loudness. Files from before tone or loudness support leave those as they are.
 - Control4 itself does not need any change: it keeps its own settings and re-asserts them on its next use.
 
 ## Before the first takeover

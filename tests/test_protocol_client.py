@@ -193,10 +193,26 @@ async def test_rollback_tool_restores_tone(amp, tmp_path):
     tool = _rollback_tool(amp.port)
     amp.eq[(0x2F, 1)], amp.eq[(0x31, 1)] = 0x18 - 4, 0x18 + 3      # out 2: bass -2 dB, balance R 1.5
     amp.source[1], amp.volume[1] = 4, 13
+    amp.loudness[1] = True
     path = str(tmp_path / "snap.json")
     await asyncio.to_thread(tool.snapshot, "127.0.0.1", path)
     amp.eq[(0x2F, 1)] = amp.eq[(0x31, 1)] = 0x18
     amp.source[1], amp.volume[1] = 0x18, 50
+    amp.loudness[1] = False
     await asyncio.to_thread(tool.restore, "127.0.0.1", path)
     assert amp.eq[(0x2F, 1)] == 0x18 - 4 and amp.eq[(0x31, 1)] == 0x18 + 3
     assert amp.source[1] == 4 and amp.volume[1] == 13
+    assert amp.loudness[1] is True
+
+
+def test_loudness_frames_and_replies():
+    assert protocol.loudness_get_frame(24) == bytes.fromhex("ff55040 31af517".replace(" ", ""))
+    assert protocol.loudness_frame(24, True) == bytes.fromhex("ff5504031a1701")
+    assert protocol.loudness_frame(24, False) == bytes.fromhex("ff5504031b1700")
+    assert protocol.parse_loudness("Get Out[24] Loudness status : On", 24) is True       # replies seen on the real amp
+    assert protocol.parse_loudness("Set Out[24] Loudness Off", 24) is False
+    assert protocol.parse_loudness("Get Out[3] Loudness status : On", 24) is None
+    assert protocol.parse_loudness("Command error") is None
+    tool = _rollback_tool(0)
+    assert tool.parse_loudness("Get Out[24] Loudness status : On") is True
+    assert tool.parse_loudness("Command error") is None

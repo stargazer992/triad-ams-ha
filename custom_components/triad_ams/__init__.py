@@ -32,7 +32,7 @@ from .coordinator import TriadConfigEntry, TriadCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.MEDIA_PLAYER, Platform.NUMBER]
+PLATFORMS = [Platform.MEDIA_PLAYER, Platform.NUMBER, Platform.SWITCH]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -103,9 +103,9 @@ def _coordinators(hass: HomeAssistant, call: ServiceCall) -> list[TriadCoordinat
     if wanted:
         loaded = [e for e in loaded if e.entry_id == wanted]
         if not loaded:
-            raise ServiceValidationError(f"No loaded Triad AMS with config entry id {wanted}")
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="entry_not_loaded", translation_placeholders={"entry_id": wanted})
     if not loaded:
-        raise ServiceValidationError("No Triad AMS is loaded")
+        raise ServiceValidationError(translation_domain=DOMAIN, translation_key="none_loaded")
     return [e.runtime_data for e in loaded]
 
 
@@ -132,7 +132,7 @@ def _register_services(hass: HomeAssistant) -> None:
         for coordinator in _coordinators(hass, call):
             source = input_number or coordinator.default_input
             if source not in coordinator.inputs and input_number:
-                raise ServiceValidationError(f"Input {input_number} is not in the configured source list")
+                raise ServiceValidationError(translation_domain=DOMAIN, translation_key="input_not_configured", translation_placeholders={"input": str(input_number)})
             await coordinator.async_party(sorted(coordinator.outputs), source, None if volume is None else round(volume * 100))
 
     target = {vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string}

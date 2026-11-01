@@ -19,9 +19,10 @@ Values above 100 for volume and above 0x18 for source return `Command error`.
 
 ## Volume curve (value -> dB)
 0:-108.5  8:-61.0  16:-47.7  32:-34.0  48:-22.5  64:-13.1  72:-9.3  80:-6.0  88:-3.3  96:-1.1  100:0.
-It is not linear. The integration interpolates between these points; `tools/triad_volume_scan.py` measures all 101 values.
+It is not linear. These are 11 of the 101 measured points; the integration has the full measured table (`protocol.VOLUME_POINTS`, see the first live write test below) and also learns the amp's exact dB from every volume SET reply. Volume up / down moves about 3 dB along that table (at least one value), so a press sounds the same at any level.
 
-## Output map (verified by nudging each room's volume, 2026-10-14)
+## Output map of the development install (verified by nudging each room's volume, 2026-10-14)
+This is one house's wiring, kept as a worked example; the integration has no built-in rooms and asks for yours at setup.
 1 Living Room, 2 Master Bedroom, 3 Master Laundry, 4 Her Bathroom, 5 Kitchen, 6 Dining, 7 Family Room, 8 Patio, 9 Pool, 10 Bar.
 Outputs 11-24 are Audio Off, volume 0 (unused or not yet mapped). Input 5 = WiiM Ultra.
 
@@ -33,9 +34,16 @@ Outputs 11-24 are Audio Off, volume 0 (unused or not yet mapped). Input 5 = WiiM
 | Balance | `... 31 ...` | `... 31 <out> <val>` | `Bal Center`, `Bal R 1` (left is parsed as `Bal L n`, wording not yet seen on the amp) |
 `<val>` = 0x00..0x30, 0x18 = flat/centre, 0.5 dB per step (-12..+12 dB). A read straight after a set can return the old value for a fraction of a second, so the integration shows the written value and confirms it on the next scheduled read.
 
+## Loudness - verified on the real unit 2026-10-31 (output 24), used by v0.5.0
+| Function | Frame | Reply |
+|---|---|---|
+| Get | `FF 55 04 03 1A F5 <out>` | `Get Out[n] Loudness status : Off` / `... : On` |
+| On | `FF 55 04 03 1A <out> 01` (or `FF 55 03 03 1A <out>`) | `Set Out[n] Loudness On` |
+| Off | `FF 55 04 03 1B <out> 00` (or `FF 55 03 03 1B <out>`) | `Set Out[n] Loudness Off` |
+Both the 6- and 7-byte set forms worked; the integration sends the 7-byte form like every other SET. Outputs 1-10 all read Off on 2026-10-31; output 24 was left Off as found.
+
 ## Other frames seen in the AMS-16 driver (https://github.com/tim-weiler/triad-audio-matrix), NOT yet tested here
-Loudness on `FF 55 03 03 1A <out>`, off `FF 55 03 03 1B <out>`; get loudness `FF 55 04 03 1A F5 <out>`;
-input gain `FF 55 04 02 04`; parametric EQ under prefix `FF 56`. On that driver volume is 0..0xA1 and Audio Off is source 16; on the 24x24 volume tops out at 100 and Audio Off is 24 (0x18).
+Input gain `FF 55 04 02 04`; parametric EQ under prefix `FF 56`. On that driver volume is 0..0xA1 and Audio Off is source 16; on the 24x24 volume tops out at 100 and Audio Off is 24 (0x18).
 
 ## Behaviour notes
 - The amp sends no unsolicited updates: the integration polls (default every 10 s). Changes made by Control4 or a wall keypad show up on the next poll.

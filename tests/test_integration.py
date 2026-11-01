@@ -50,7 +50,7 @@ async def test_monitor_mode_reads_and_never_writes(hass, amp):
     assert hass.states.get(_eid(hass, entry, 1)).state == "off"
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call("media_player", "volume_set", {"entity_id": _eid(hass, entry, 5), "volume_level": 0.2}, blocking=True)
-    assert all(f[4] in (0x1D, 0x1E, 0x17, 0x2F, 0x30, 0x31) and f[5] == 0xF5 for f in amp.frames)    # only GET frames were ever sent
+    assert all(f[4] in (0x1D, 0x1E, 0x17, 0x2F, 0x30, 0x31, 0x1A) and f[5] == 0xF5 for f in amp.frames)    # only GET frames were ever sent
 
 
 async def test_control_mode_commands(hass, amp):
@@ -64,7 +64,7 @@ async def test_control_mode_commands(hass, amp):
     assert amp.muted[4] is True
     assert hass.states.get(kitchen).attributes["is_volume_muted"] is True
     await hass.services.async_call("media_player", "volume_up", {"entity_id": kitchen}, blocking=True)
-    assert amp.volume[4] == 69 and amp.muted[4] is False       # volume set clears mute on the amp
+    assert amp.volume[4] == 70 and amp.muted[4] is False       # +3 dB (-13.1 -> about -10.1) and volume set clears mute
     await hass.services.async_call("media_player", "select_source", {"entity_id": kitchen, "source": "Apple TV"}, blocking=True)
     assert amp.source[4] == 1
     await hass.services.async_call("media_player", "turn_off", {"entity_id": kitchen}, blocking=True)
@@ -161,7 +161,7 @@ async def test_volume_reads_back_as_written(hass, amp):
     await hass.services.async_call("media_player", "turn_on", {"entity_id": kitchen}, blocking=True)
     assert amp.volume[4] == 13                                   # no creep to 14
     await hass.services.async_call("media_player", "volume_up", {"entity_id": kitchen}, blocking=True)
-    assert amp.volume[4] == 18
+    assert amp.volume[4] == 16                                   # +3 dB from -50.5
 
 
 async def test_learned_curve_survives_restart(hass, amp):
@@ -401,3 +401,92 @@ async def test_diagnostics(hass, amp):
     assert diag["outputs"]["5"]["name"] == "Kitchen" and diag["outputs"]["5"]["volume_value"] == 13
     assert diag["snapshot"]["5"]["source"] == 5
     amp.silent = False
+
+
+async def test_volume_steps_are_about_3_db_and_always_move(hass, amp):
+    from tests.fake_amp import _db
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    kitchen = _eid(hass, entry, 5)
+    await hass.services.async_call("media_player", "turn_on", {"entity_id": kitchen}, blocking=True)
+    for start in (0.10, 0.40, 0.80):
+        await hass.services.async_call("media_player", "volume_set", {"entity_id": kitchen, "volume_level": start}, blocking=True)
+        before = amp.volume[4]
+        await hass.services.async_call("media_player", "volume_up", {"entity_id": kitchen}, blocking=True)
+        assert amp.volume[4] > before and 1.5 <= _db(amp.volume[4]) - _db(before) <= 4.5
+        await hass.services.async_call("media_player", "volume_down", {"entity_id": kitchen}, blocking=True)
+        assert amp.volume[4] < before + 1 or amp.volume[4] == before
+    await hass.services.async_call("media_player", "volume_set", {"entity_id": kitchen, "volume_level": 0.99}, blocking=True)
+    await hass.services.async_call("media_player", "volume_up", {"entity_id": kitchen}, blocking=True)
+    assert amp.volume[4] == 100
+
+
+async def test_dragged_volume_slider_sends_only_the_latest_value(hass, amp):
+    import asyncio
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    coordinator = entry.runtime_data
+    amp.frames.clear()
+    await asyncio.gather(*(coordinator.async_set_volume_value(5, v) for v in range(20, 30)))
+    sets = [f for f in amp.frames if f[4] == 0x1E and f[5] == 4 and len(f) == 7]
+    assert len(sets) <= 2 and amp.volume[4] == 29
+
+
+async def test_loudness_switch_reads_sets_and_is_in_the_snapshot(hass, amp):
+    amp.loudness[4] = True
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    loud = er.async_get(hass).async_get_entity_id("switch", DOMAIN, f"{entry.entry_id}_out5_loudness")
+    assert loud == "switch.kitchen_loudness" and hass.states.get(loud).state == "on"
+    await hass.services.async_call("switch", "turn_off", {"entity_id": loud}, blocking=True)
+    assert amp.loudness[4] is False and hass.states.get(loud).state == "off"
+    await hass.services.async_call(DOMAIN, "snapshot", {}, blocking=True, return_response=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": loud}, blocking=True)
+    assert amp.loudness[4] is True
+    await hass.services.async_call(DOMAIN, "restore_snapshot", {}, blocking=True, return_response=True)
+    assert amp.loudness[4] is False and hass.states.get(loud).state == "off"
+
+
+async def test_loudness_switch_is_read_only_in_monitor_mode(hass, amp):
+    entry = await _setup(hass, amp)
+    loud = er.async_get(hass).async_get_entity_id("switch", DOMAIN, f"{entry.entry_id}_out5_loudness")
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call("switch", "turn_on", {"entity_id": loud}, blocking=True)
+    assert amp.loudness[4] is False
+
+
+async def test_now_playing_comes_from_the_player_linked_to_the_rooms_input(hass, amp):
+    from homeassistant.components.media_player import MediaPlayerEntityFeature
+    from pytest_homeassistant_custom_component.common import async_mock_service
+
+    from custom_components.triad_ams.const import CONF_SOURCE_PLAYERS
+    amp.source[4], amp.volume[4] = 4, 30                 # Kitchen on input 5
+    amp.source[0], amp.volume[0] = 1, 30                 # Living Room on input 2 (no linked player)
+    hass.states.async_set("media_player.streamer", "playing", {"media_title": "Song", "media_artist": "Band", "entity_picture": "/art.jpg"})
+    entry = await _setup(hass, amp, MODE_CONTROL)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_SOURCE_PLAYERS: {"5": "media_player.streamer"}})
+    await hass.async_block_till_done()
+    kitchen, living = _eid(hass, entry, 5), _eid(hass, entry, 1)
+    state = hass.states.get(kitchen)
+    assert state.attributes["media_title"] == "Song" and state.attributes["media_artist"] == "Band"
+    assert state.attributes["entity_picture"] == "/art.jpg" and state.attributes["linked_player"] == "media_player.streamer"
+    assert state.attributes["supported_features"] & MediaPlayerEntityFeature.NEXT_TRACK
+    assert state.state == "on"                           # room state stays on/off; dashboards rely on it
+    assert "media_title" not in hass.states.get(living).attributes
+    assert not hass.states.get(living).attributes["supported_features"] & MediaPlayerEntityFeature.NEXT_TRACK
+    hass.states.async_set("media_player.streamer", "playing", {"media_title": "Next song"})
+    await hass.async_block_till_done()
+    assert hass.states.get(kitchen).attributes["media_title"] == "Next song"
+    room = hass.data["entity_components"]["media_player"].get_entity(kitchen)
+    calls = async_mock_service(hass, "media_player", "media_next_track")
+    await room.async_media_next_track()
+    assert calls[-1].data["entity_id"] == "media_player.streamer"
+
+
+async def test_options_now_playing_step_validates(hass, amp):
+    from custom_components.triad_ams.const import CONF_SOURCE_PLAYERS
+    entry = await _setup(hass, amp)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "players"})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"players": "5=light.kitchen"})
+    assert result["errors"] == {"players": "invalid_players"}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"players": "5=media_player.streamer"})
+    assert result["type"] == "create_entry"
+    assert entry.options[CONF_SOURCE_PLAYERS] == {"5": "media_player.streamer"}

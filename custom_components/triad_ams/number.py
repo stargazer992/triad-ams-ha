@@ -12,12 +12,20 @@ from . import protocol
 from .const import CONF_HOST, DOMAIN
 from .coordinator import TriadConfigEntry, TriadCoordinator
 
-# kind -> (display name, icon)
-KINDS = {
-    "bass": ("Bass", "mdi:speaker"),
-    "treble": ("Treble", "mdi:music-clef-treble"),
-    "balance": ("Balance", "mdi:scale-balance"),
-}
+# kind -> icon (the names come from translations/en.json, entity.number.<kind>)
+ICONS = {"bass": "mdi:speaker", "treble": "mdi:music-clef-treble", "balance": "mdi:scale-balance"}
+
+
+def room_device_info(coordinator: TriadCoordinator, entry: TriadConfigEntry, output: int) -> DeviceInfo:
+    """Identical to the room's media player, so every entity of a room lands on one device whichever platform loads first."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry.entry_id}_out{output}")},
+        name=coordinator.outputs[output],
+        manufacturer="Triad",
+        model="AMS audio matrix",
+        via_device_id=coordinator.hub_device_id,
+        configuration_url=f"http://{entry.data[CONF_HOST]}",
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TriadConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
@@ -44,17 +52,10 @@ class TriadTone(CoordinatorEntity[TriadCoordinator], NumberEntity):
         super().__init__(coordinator)
         self._output = output
         self._kind = kind
-        self._attr_name, self._attr_icon = KINDS[kind]
+        self._attr_translation_key = kind
+        self._attr_icon = ICONS[kind]
         self._attr_unique_id = f"{entry.entry_id}_out{output}_{kind}"
-        # identical to the room's media player, so both land on one device whichever platform loads first
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry.entry_id}_out{output}")},
-            name=coordinator.outputs[output],
-            manufacturer="Triad",
-            model="AMS audio matrix",
-            via_device_id=coordinator.hub_device_id,
-            configuration_url=f"http://{entry.data[CONF_HOST]}",
-        )
+        self._attr_device_info = room_device_info(coordinator, entry, output)
 
     @property
     def native_value(self) -> float | None:

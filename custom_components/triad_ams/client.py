@@ -127,6 +127,11 @@ class TriadClient:
             result[out][kind] = value
         return result
 
+    async def read_loudness(self, outputs: list[int]) -> dict[int, bool | None]:
+        """Loudness on/off of the given 1-based outputs in one session. None where the amp gave no usable answer."""
+        replies = await self._run([protocol.loudness_get_frame(out) for out in outputs])
+        return {out: protocol.parse_loudness(reply, out) for out, reply in zip(outputs, replies, strict=True)}
+
     async def write(self, frames: list[bytes]) -> list[str]:
         """Send set frames; raises TriadError if the amp answers 'Command error' or nothing."""
         replies = await self._run(frames, write=True)

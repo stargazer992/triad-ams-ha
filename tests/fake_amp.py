@@ -33,6 +33,7 @@ class FakeAmp:
         self.ignore_mute_after_source = 0.0               # seconds; a (un)mute this soon after a source change is acknowledged but ignored
         self._source_changed: dict[int, float] = {}
         self.eq = {(c, n): 0x18 for c in (0x2F, 0x30, 0x31) for n in range(24)}   # bass / treble / balance, 0x18 = flat
+        self.loudness = {n: False for n in range(24)}
         self.silent = False                                # True = accept but never answer
         self.garble: set[tuple[int, int]] = set()          # (cmd, zero based out) GETs answered with "Command error"
         self._server: asyncio.AbstractServer | None = None
@@ -80,6 +81,8 @@ class FakeAmp:
                 return f"Get Out[{n}] Mute status : " + ("mute" if self.muted[out] else "Unmute")
             if cmd in (0x2F, 0x30, 0x31):
                 return f"Get Out[{n}] {self._eq_name(cmd)} : {self._eq_text(cmd, self.eq[(cmd, out)])}"
+            if cmd == 0x1A:
+                return f"Get Out[{n}] Loudness status : " + ("On" if self.loudness[out] else "Off")
             return "Command error"
         value = frame[6] if len(frame) > 6 else 0
         if cmd in (0x2F, 0x30, 0x31):
@@ -104,6 +107,9 @@ class FakeAmp:
             if not recent:
                 self.muted[out] = cmd == 0x17
             return f"Set Out[{n}] " + ("Mute" if cmd == 0x17 else "Unmute")
+        if cmd in (0x1A, 0x1B):
+            self.loudness[out] = cmd == 0x1A
+            return f"Set Out[{n}] Loudness " + ("On" if cmd == 0x1A else "Off")
         if cmd == 0x16:
             self.volume[out] = max(0, self.volume[out] - 3)
             return f"Set Out[{n}] Volume -3db"

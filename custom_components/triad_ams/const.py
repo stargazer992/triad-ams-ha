@@ -10,6 +10,7 @@ CONF_OUTPUTS = "outputs"                  # {"1": "Kitchen", ...}    amp output 
 CONF_INPUTS = "inputs"                    # {"5": "Streamer", ...}   amp input number (1-24) -> source name
 CONF_DEFAULT_INPUT = "default_input"      # input used when a room is switched on without a remembered source
 CONF_POLL_SECONDS = "poll_seconds"
+CONF_SOURCE_PLAYERS = "source_players"  # {"5": "media_player.streamer"} amp input -> HA player that feeds it (now playing)
 
 MODE_MONITOR = "monitor"                  # never writes to the amp; Control4 keeps full control
 MODE_CONTROL = "control"                  # HA drives the amp

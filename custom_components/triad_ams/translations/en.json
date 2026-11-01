@@ -47,6 +47,7 @@
           "monitor": "Roll back to monitor only (Control4 keeps control)",
           "rooms": "Rooms (outputs)",
           "sources": "Sources (inputs)",
+          "players": "Now playing (link sources to players)",
           "settings": "Settings"
         }
       },
@@ -77,11 +78,19 @@
         "data": {
           "poll_seconds": "Refresh interval (seconds)"
         }
+      },
+      "players": {
+        "title": "Now playing",
+        "description": "Optional. One per line as input=media_player entity, inputs 1-24. Example: 5=media_player.streamer. Rooms on that input then show its title, artist and artwork, and play / pause / next control that player. Leave empty for none.",
+        "data": {
+          "players": "Source players"
+        }
       }
     },
     "error": {
       "invalid_map": "Use one 'number=Name' per line with numbers 1-24.",
-      "default_not_in_sources": "The default input must be one of the listed sources."
+      "default_not_in_sources": "The default input must be one of the listed sources.",
+      "invalid_players": "Use one 'number=media_player.entity' per line with numbers 1-24."
     },
     "abort": {
       "not_confirmed": "Nothing changed.",
@@ -137,6 +146,59 @@
           "description": "Optional volume 0-1 for every room."
         }
       }
+    }
+  },
+  "entity": {
+    "number": {
+      "bass": {
+        "name": "Bass"
+      },
+      "treble": {
+        "name": "Treble"
+      },
+      "balance": {
+        "name": "Balance"
+      }
+    },
+    "switch": {
+      "loudness": {
+        "name": "Loudness"
+      }
+    }
+  },
+  "exceptions": {
+    "monitor_mode": {
+      "message": "Triad AMS is in monitor mode (read only), Control4 owns the amp. Switch to control mode in the integration options first."
+    },
+    "amp_error": {
+      "message": "Triad AMS: {error}"
+    },
+    "unknown_tone": {
+      "message": "Unknown tone control {kind}."
+    },
+    "snapshot_incomplete": {
+      "message": "The amp did not fully answer for outputs {outputs}, so the snapshot was not saved."
+    },
+    "no_snapshot": {
+      "message": "No snapshot saved yet, run triad_ams.snapshot first."
+    },
+    "entry_not_loaded": {
+      "message": "No loaded Triad AMS with config entry id {entry_id}."
+    },
+    "none_loaded": {
+      "message": "No Triad AMS is loaded."
+    },
+    "input_not_configured": {
+      "message": "Input {input} is not in the configured source list."
+    },
+    "unknown_source": {
+      "message": "Unknown source {source}."
+    },
+    "not_a_room": {
+      "message": "{entity_id} is not a Triad room."
+    },
+    "no_linked_player": {
+      "message": "This room's source has no linked player. Link one in the integration options (Now playing)."
     }
   }
 }

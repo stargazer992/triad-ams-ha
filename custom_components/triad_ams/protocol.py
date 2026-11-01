@@ -14,6 +14,7 @@ Commands:
     0x2F bass     value = 0x18 + 2*dB  (0x00..0x30 = -12..+12 dB in 0.5 dB steps, 0x18 = flat)
     0x30 treble   same encoding
     0x31 balance  same encoding, 0x18 = centre, above = right, below = left
+    0x1A loudness on (GET 0x1A reads it: 'Get Out[n] Loudness status : On'), 0x1B loudness off (verified 2026-10-31)
 Replies are plain text, null terminated. Output bytes are zero based (byte 0 = "Out[1]").
 """
 from __future__ import annotations
@@ -30,6 +31,9 @@ CMD_MUTE = 0x17
 CMD_UNMUTE = 0x18
 CMD_SOURCE = 0x1D
 CMD_VOLUME = 0x1E
+
+CMD_LOUDNESS_ON = 0x1A
+CMD_LOUDNESS_OFF = 0x1B
 
 CMD_BASS = 0x2F
 CMD_TREBLE = 0x30
@@ -154,6 +158,14 @@ def mute_frame(output: int, mute: bool) -> bytes:
     return set_frame(CMD_MUTE if mute else CMD_UNMUTE, output, 1 if mute else 0)
 
 
+def loudness_get_frame(output: int) -> bytes:
+    return get_frame(CMD_LOUDNESS_ON, output)
+
+
+def loudness_frame(output: int, on: bool) -> bytes:
+    return set_frame(CMD_LOUDNESS_ON if on else CMD_LOUDNESS_OFF, output, 1 if on else 0)
+
+
 def db_to_eq_byte(db: float) -> int:
     """dB (-12..+12, 0.5 steps) -> amp byte. Out of range values are clamped."""
     db = max(EQ_MIN_DB, min(EQ_MAX_DB, float(db)))
@@ -184,6 +196,7 @@ _INPUT = re.compile(r"input\s+(\d+)", re.I)
 _EQ = re.compile(r"Out\[(\d+)\]\s+(Bass|Treble|Balance)\s*:?\s*(?:to\s+)?(.+)", re.I)
 _BAL = re.compile(r"Bal(?:ance)?\s*(Center|Centre|[LR])?\s*(-?\d+(?:\.\d+)?)?", re.I)
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
+_LOUD = re.compile(r"Out\[(\d+)\]\s+Loudness(?:\s+status)?\s*:?\s*(On|Off)\b", re.IGNORECASE)
 _SET_VOL = re.compile(r"Out\[(\d+)\]\s+Output Volume to\s*(-?\d+(?:\.\d+)?)", re.I)
 
 
@@ -237,6 +250,14 @@ def parse_set_volume(text: str) -> tuple[int, float] | None:
     """'Set Out[n] Output Volume to -13.1' -> (n, -13.1)."""
     match = _SET_VOL.search(text.replace("\x00", " "))
     return (int(match.group(1)), float(match.group(2))) if match else None
+
+
+def parse_loudness(text: str, output: int | None = None) -> bool | None:
+    """'Get Out[2] Loudness status : On' (or 'Set Out[2] Loudness Off') -> True / False. None if not understood."""
+    match = _LOUD.search(text.replace("\x00", " "))
+    if not match or not _for_output(match, output):
+        return None
+    return match.group(2).lower() == "on"
 
 
 def is_error(text: str) -> bool:

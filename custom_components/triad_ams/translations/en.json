@@ -53,7 +53,7 @@
       },
       "control": {
         "title": "Take control of the amp",
-        "description": "A snapshot of every room's source, volume and mute is saved first. Keep Control4 audio idle while HA controls the amp: two controllers writing at once will fight.",
+        "description": "A snapshot of every room's source, volume, mute, tone and loudness is saved first. Keep Control4 audio idle while HA controls the amp: two controllers writing at once will fight.",
         "data": {
           "confirm": "Yes, take control"
         }

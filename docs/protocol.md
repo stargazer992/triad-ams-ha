@@ -22,7 +22,7 @@ Values above 100 for volume and above 0x18 for source return `Command error`.
 It is not linear. These are 11 of the 101 measured points; the integration has the full measured table (`protocol.VOLUME_POINTS`, see the first live write test below) and also learns the amp's exact dB from every volume SET reply. Volume up / down moves about 3 dB along that table (at least one value), so a press sounds the same at any level.
 
 ## Output map of the development install (verified by nudging each room's volume, 2026-10-14)
-This is one house's wiring, kept as a worked example; the integration has no built-in rooms and asks for yours at setup.
+This is one house's wiring, kept as a worked example; the integration has no built-in rooms and asks for yours at setup. Rooms, entities and how home-assistant-config uses them: [installation.md](installation.md).
 1 Living Room, 2 Master Bedroom, 3 Master Laundry, 4 Her Bathroom, 5 Kitchen, 6 Dining, 7 Family Room, 8 Patio, 9 Pool, 10 Bar.
 Outputs 11-24 are Audio Off, volume 0 (unused or not yet mapped). Input 5 = WiiM Ultra.
 
